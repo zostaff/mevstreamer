@@ -1,0 +1,31 @@
+# Все Python-зависимости проекта (объединение ingestion/ vision/ audio/ signal/requirements.txt).
+# pip install -r requirements.txt   (или scripts/build.sh)
+# Системные: ffmpeg (brew install ffmpeg / apt install ffmpeg); опционально tesseract
+
+# --- общие
+numpy>=1.26
+python-dotenv>=1.0
+Pillow>=10.0
+
+# --- ingestion: CLI-резолверы прямых URL стрима (ставятся в PATH)
+streamlink>=6.0
+yt-dlp>=2024.1.1
+
+# --- vision
+# macOS: Apple Vision OCR (OCR_ENGINE=auto выбирает его) — ~94 мс/кадр против ~720 мс у EasyOCR на MPS
+pyobjc-framework-Vision>=10; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10; sys_platform == "darwin"
+easyocr>=1.7
+# headless-сборка: easyocr сам тянет opencv-python-headless; ставить рядом
+# opencv-python нельзя — удаление одного из них ломает cv2
+opencv-python-headless>=4.8
+# для OCR_ENGINE=tesseract (+ системный бинарь tesseract):
+# pytesseract>=0.3.10
+
+# --- audio (тянет ctranslate2 + onnxruntime для silero VAD)
+faster-whisper>=1.0.0
+
+# --- signal
+aiohttp>=3.9
+# CA-бандл: python.org-сборки без системных корней → HTTPS резолвера падал бы
+certifi>=2024.2.2

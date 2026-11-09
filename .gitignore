@@ -1,0 +1,17 @@
+# secrets
+.env
+executor/.env
+
+# build / runtime
+.venv/
+executor/target/
+logs/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# macOS (incl. AppleDouble files on exFAT drives)
+.DS_Store
+._*

@@ -1,0 +1,9 @@
+numpy>=1.26
+python-dotenv>=1.0
+Pillow>=10.0
+
+# CLI-резолверы прямых URL (ставятся в PATH вместе с пакетом)
+streamlink>=6.0
+yt-dlp>=2024.1.1
+
+# Системная зависимость: ffmpeg (brew install ffmpeg / apt install ffmpeg)
