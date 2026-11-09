@@ -119,7 +119,8 @@ pub fn unsigned(payer: &Pubkey, ixs: &[Instruction], blockhash: Hash) -> Result<
     Ok(VersionedTransaction { signatures: vec![Signature::default(); n], message: VersionedMessage::V0(msg) })
 }
 
-fn with_budget_and_tips(payer: &Pubkey, budget: Budget, trade: Vec<Instruction>, tips: &[(Pubkey, u64)]) -> Vec<Instruction> {
+/// Compute budget first, then `trade`, then one transfer per non-zero tip.
+pub fn with_budget_and_tips(payer: &Pubkey, budget: Budget, trade: Vec<Instruction>, tips: &[(Pubkey, u64)]) -> Vec<Instruction> {
     let mut ixs = Vec::with_capacity(2 + trade.len() + tips.len());
     ixs.push(set_compute_unit_limit(budget.cu_limit));
     if budget.cu_price_micro_lamports > 0 {
@@ -176,6 +177,12 @@ pub fn sell_instructions(
         trade.push(close_account(&accounts.token_program, &accounts.user_ata, user, user));
     }
     with_budget_and_tips(user, budget, trade, tips)
+}
+
+/// SPL Token `SyncNative` (index 17): sets a wrapped-SOL account's token amount to
+/// its lamports above rent — needed after transferring SOL into it.
+pub fn sync_native(account: &Pubkey) -> Instruction {
+    Instruction { program_id: pda::TOKEN_PROGRAM, accounts: vec![AccountMeta::new(*account, false)], data: vec![17] }
 }
 
 /// Priority fee in lamports for a budget: ceil(price × limit / 10⁶).

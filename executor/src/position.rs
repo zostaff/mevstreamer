@@ -21,6 +21,37 @@ use std::time::{Duration, Instant};
 /// Log each open position about every 3 s (the monitor itself ticks faster).
 const LOG_EVERY: Duration = Duration::from_secs(3);
 
+/// Where the position trades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Venue {
+    /// pump.fun bonding curve (v3 trades).
+    Curve,
+    /// PumpSwap pool (v2 trades) — migrated coins.
+    Amm { pool: Pubkey, base_vault: Pubkey, quote_vault: Pubkey },
+}
+
+impl Venue {
+    pub fn encode(&self) -> String {
+        match self {
+            Venue::Curve => "curve".into(),
+            Venue::Amm { pool, base_vault, quote_vault } => format!("amm:{pool}:{base_vault}:{quote_vault}"),
+        }
+    }
+
+    pub fn decode(s: &str) -> Option<Venue> {
+        if s.is_empty() || s == "curve" {
+            return Some(Venue::Curve);
+        }
+        let mut it = s.strip_prefix("amm:")?.split(':').map(Pubkey::from_str);
+        let (pool, base_vault, quote_vault) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
+        Some(Venue::Amm { pool, base_vault, quote_vault })
+    }
+
+    pub fn from_market(m: &crate::pumpswap::AmmMarket) -> Venue {
+        Venue::Amm { pool: m.pool_key, base_vault: m.pool.pool_base_token_account, quote_vault: m.pool.pool_quote_token_account }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Position {
     pub mint: Pubkey,
@@ -46,6 +77,9 @@ pub struct Position {
     /// The live curve never saw it, so valuation re-applies it (otherwise selling our
     /// paper tokens runs into the curve's real reserves and the value reads ~0).
     pub paper_net_in: u64,
+    pub venue: Venue,
+    /// Paper positions on a pool: our simulated buy, re-applied when valuing.
+    pub paper_amm: Option<crate::pumpswap::AmmBuyQuote>,
 }
 
 impl Position {
@@ -72,6 +106,7 @@ impl Position {
             peak_value: self.peak_value,
             rent_lamports: self.rent_lamports,
             buy_sig: self.buy_sig.clone(),
+            venue: self.venue.encode(),
         }
     }
 
@@ -95,6 +130,8 @@ impl Position {
             exit_attempts: 0,
             buy_sig: s.buy_sig.clone(),
             paper_net_in: 0,
+            venue: Venue::decode(&s.venue)?,
+            paper_amm: None,
         })
     }
 }
@@ -166,7 +203,7 @@ impl PositionManager {
                     state: "pending".into(), mint: mint.to_string(), ticker: pb.ticker.clone(),
                     token_program: String::new(), token_amount: 0, cost_lamports: 0, mint_supply: 0,
                     entry_price: 0, entry_unix: unix_now(), peak_value: 0, rent_lamports: 0,
-                    buy_sig: pb.signature.clone().unwrap_or_default(),
+                    buy_sig: pb.signature.clone().unwrap_or_default(), venue: String::new(),
                 })),
             })
             .collect();
@@ -227,6 +264,16 @@ impl PositionManager {
 
     pub fn count(&self) -> usize {
         self.slots.lock().unwrap().len()
+    }
+
+    /// Curve completed → keep managing the position on its PumpSwap pool.
+    pub fn set_venue(&self, mint: &Pubkey, venue: Venue) {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(Slot::Open(p) | Slot::Closing(p)) = slots.get_mut(mint) {
+            p.venue = venue;
+            p.paper_net_in = 0;
+        }
+        self.persist(&slots);
     }
 
     /// Raise the stored peak (in memory; persisted with the next state change).
@@ -352,6 +399,67 @@ fn spawn_exit(exec: &Arc<Executor>, mint: &Pubkey, reason: ExitReason) {
     }
 }
 
+/// Value of `pos` now (lamports selling everything returns, + ATA rent back), from
+/// the venue accounts fetched for it. `Ok(None)` = curve completed (venue must move).
+fn value_now(exec: &Executor, pos: &Position, accs: &[Option<crate::rpc::AccountData>]) -> Result<Option<u64>, String> {
+    match pos.venue {
+        Venue::Curve => {
+            let acc = accs[0].as_ref().ok_or("curve account missing")?;
+            let curve = BondingCurve::parse(&acc.data).map_err(|e| e.to_string())?;
+            if curve.complete {
+                return Ok(None);
+            }
+            let (global, fees) = exec.pump_state();
+            let v = crate::bonding::sell_sol_out(&global, &fees, &pos.effective_curve(&curve), pos.mint_supply, pos.token_amount)
+                .map_err(|e| e.to_string())?;
+            Ok(Some(v + pos.rent_lamports))
+        }
+        Venue::Amm { pool, base_vault, quote_vault } => {
+            let pool_acc = accs[0].as_ref().ok_or("pool account missing")?;
+            let m = crate::pumpswap::AmmMarket::from_accounts(
+                pool, pool_acc, &[(base_vault, accs[1].as_ref()), (quote_vault, accs[2].as_ref())],
+                pos.accounts.token_program, pos.mint_supply,
+            )
+            .map_err(|e| e.to_string())?
+            .ok_or("pool vaults missing")?;
+            let m = match &pos.paper_amm {
+                Some(q) => m.after_buy(q),
+                None => m,
+            };
+            let (gc, fc) = exec.amm_state();
+            let q = crate::pumpswap::sell(&gc, &fc, &m, pos.token_amount).map_err(|e| e.to_string())?;
+            Ok(Some(q.sol_out + pos.rent_lamports))
+        }
+    }
+}
+
+fn venue_keys(pos: &Position) -> Vec<Pubkey> {
+    match pos.venue {
+        Venue::Curve => vec![pos.accounts.bonding_curve],
+        Venue::Amm { pool, base_vault, quote_vault } => vec![pool, base_vault, quote_vault],
+    }
+}
+
+/// Curve completed under an open position: find its PumpSwap pool and move there.
+fn spawn_migrate(exec: &Arc<Executor>, pos: &Position) {
+    if !exec.migrating.lock().unwrap().insert(pos.mint) {
+        return;
+    }
+    let e = Arc::clone(exec);
+    let (mint, ticker) = (pos.mint, pos.ticker.clone());
+    tokio::spawn(async move {
+        match crate::pumpswap::fetch_market(&e.rpc, &mint).await {
+            Ok(m) if m.check_supported().is_ok() => {
+                log_warn!("${ticker} {} graduated → now managed on PumpSwap pool {}", short(&mint), short(&m.pool_key));
+                e.positions.set_venue(&mint, Venue::from_market(&m));
+            }
+            Ok(m) => log_error!("${ticker} {} graduated to an unsupported pool: {:?}", short(&mint), m.check_supported().err()),
+            Err(err) => log_warn!("${ticker} {} graduated, pool not available yet ({err}) — retrying", short(&mint)),
+        }
+        e.migrating.lock().unwrap().remove(&mint);
+    });
+}
+
 pub async fn run_monitor(exec: Arc<Executor>) {
     let mut tick = tokio::time::interval(Duration::from_millis(exec.cfg.monitor_interval_ms));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -363,12 +471,13 @@ pub async fn run_monitor(exec: Arc<Executor>) {
             continue;
         }
         let now = Instant::now();
-        // One round-trip for every tracked curve.
-        let keys: Vec<Pubkey> = open.iter().map(|p| p.accounts.bonding_curve).collect();
+        // One round-trip for every tracked curve and pool.
+        let groups: Vec<Vec<Pubkey>> = open.iter().map(venue_keys).collect();
+        let keys: Vec<Pubkey> = groups.iter().flatten().copied().collect();
         let accounts = match exec.rpc.get_multiple_accounts(&keys).await {
             Ok(a) => a,
             Err(e) => {
-                log_warn!("monitor: curve fetch failed: {e}");
+                log_warn!("monitor: venue fetch failed: {e}");
                 // Without prices we can still honour the timeout.
                 for p in open.iter().filter(|p| now.duration_since(p.entry_time) >= Duration::from_secs(exec.cfg.timeout_sec)) {
                     spawn_exit(&exec, &p.mint, ExitReason::Timeout);
@@ -380,28 +489,24 @@ pub async fn run_monitor(exec: Arc<Executor>) {
         if log_now {
             last_log = now;
         }
-        let (global, fees) = exec.pump_state();
-        for (pos, acc) in open.into_iter().zip(accounts) {
-            let curve = match acc.map(|a| BondingCurve::parse(&a.data)) {
-                Some(Ok(c)) => c,
-                Some(Err(e)) => {
-                    log_warn!("monitor: {} bad curve data: {e}", pos.mint);
+        let mut off = 0;
+        for (pos, g) in open.into_iter().zip(groups) {
+            let accs = &accounts[off..off + g.len()];
+            off += g.len();
+            let timed_out = now.duration_since(pos.entry_time) >= Duration::from_secs(exec.cfg.timeout_sec);
+            let value = match value_now(&exec, &pos, accs) {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    spawn_migrate(&exec, &pos);
                     continue;
                 }
-                None => {
-                    log_warn!("monitor: {} curve account missing", pos.mint);
-                    continue;
-                }
-            };
-            let value = match crate::bonding::sell_sol_out(&global, &fees, &pos.effective_curve(&curve), pos.mint_supply, pos.token_amount) {
-                Ok(v) => v + pos.rent_lamports,
                 Err(e) => {
                     // Never read "can't quote" as "worth 0" — that would fire the stop-loss.
                     if log_now {
                         log_warn!("  {} ${} cannot value position: {e}", short(&pos.mint), pos.ticker);
                     }
-                    if now.duration_since(pos.entry_time) >= Duration::from_secs(exec.cfg.timeout_sec) || curve.complete {
-                        spawn_exit(&exec, &pos.mint, if curve.complete { ExitReason::Graduated } else { ExitReason::Timeout });
+                    if timed_out {
+                        spawn_exit(&exec, &pos.mint, ExitReason::Timeout);
                     }
                     continue;
                 }
@@ -410,9 +515,10 @@ pub async fn run_monitor(exec: Arc<Executor>) {
             if log_now {
                 let bps = change_bps(pos.cost_sol, value);
                 log_dim!(
-                    "  {} ${} value {:+}.{:02}% (peak {:+}%) held {}s PnL {}",
+                    "  {} ${} [{}] value {:+}.{:02}% (peak {:+}%) held {}s PnL {}",
                     short(&pos.mint),
                     pos.ticker,
+                    if pos.venue == Venue::Curve { "curve" } else { "pool" },
                     bps / 100,
                     (bps % 100).abs(),
                     change_bps(pos.cost_sol, pos.peak_value.max(value)) / 100,
@@ -420,7 +526,7 @@ pub async fn run_monitor(exec: Arc<Executor>) {
                     fmt_sol(value as i128 - pos.cost_sol as i128)
                 );
             }
-            if let Some(reason) = check_exit(&pos, value, curve.complete, &exec.cfg, now) {
+            if let Some(reason) = check_exit(&pos, value, false, &exec.cfg, now) {
                 spawn_exit(&exec, &pos.mint, reason);
             }
         }
@@ -466,6 +572,8 @@ mod tests {
             exit_attempts: 0,
             buy_sig: String::new(),
             paper_net_in: 0,
+            venue: Venue::Curve,
+            paper_amm: None,
         }
     }
 
@@ -542,6 +650,15 @@ mod tests {
         assert!(pm.risk_check(&c).unwrap_err().contains("in a row"));
         let c2 = Config { max_session_loss_lamports: 50, max_consecutive_losses: 0, ..cfg() };
         assert!(pm.risk_check(&c2).unwrap_err().contains("loss limit"));
+    }
+
+    #[test]
+    fn venue_encoding() {
+        let v = Venue::Amm { pool: Pubkey::new_unique(), base_vault: Pubkey::new_unique(), quote_vault: Pubkey::new_unique() };
+        assert_eq!(Venue::decode(&v.encode()), Some(v));
+        assert_eq!(Venue::decode(""), Some(Venue::Curve));
+        assert_eq!(Venue::decode("curve"), Some(Venue::Curve));
+        assert_eq!(Venue::decode("amm:bad"), None);
     }
 
     #[test]

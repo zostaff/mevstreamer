@@ -37,6 +37,9 @@ pub struct Saved {
     pub peak_value: u64,
     pub rent_lamports: u64,
     pub buy_sig: String,
+    /// "curve" | "amm:<pool>:<base vault>:<quote vault>" (missing in old journals = curve)
+    #[serde(default)]
+    pub venue: String,
 }
 
 pub struct Journal {
@@ -114,7 +117,7 @@ mod tests {
         let s = Saved {
             state: "open".into(), mint: "m".into(), ticker: "T".into(), token_program: "p".into(),
             token_amount: 1, cost_lamports: 2, mint_supply: 3, entry_price: 4, entry_unix: 5.0,
-            peak_value: 6, rent_lamports: 7, buy_sig: "s".into(),
+            peak_value: 6, rent_lamports: 7, buy_sig: "s".into(), venue: String::new(),
         };
         j.save(std::slice::from_ref(&s));
         assert_eq!(j.load().unwrap(), vec![s]);

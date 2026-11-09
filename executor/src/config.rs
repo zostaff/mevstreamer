@@ -11,6 +11,10 @@ pub const DEFAULT_SOCKET_PATH: &str = "/tmp/mev-streamer.sock";
 /// raises effective priority (fee per requested CU) and cuts the priority-fee cost.
 pub const DEFAULT_CU_LIMIT_BUY: u32 = 90_000;
 pub const DEFAULT_CU_LIMIT_SELL: u32 = 60_000;
+/// PumpSwap v2 incl. wSOL wrap/unwrap and ATA creation: buy 81–84k, sell ~58k CU
+/// measured by `--selfcheck-amm` (2026-11-09).
+pub const DEFAULT_CU_LIMIT_AMM_BUY: u32 = 100_000;
+pub const DEFAULT_CU_LIMIT_AMM_SELL: u32 = 75_000;
 
 /// Fixed amount, or derived live and clamped to `[min, max]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +55,8 @@ pub struct Config {
     pub priority_fee: Auto,
     pub cu_limit_buy: u32,
     pub cu_limit_sell: u32,
+    pub cu_limit_amm_buy: u32,
+    pub cu_limit_amm_sell: u32,
     pub socket_path: String,
 
     // ---- exits
@@ -117,6 +123,8 @@ impl Config {
             ).map_err(|e| format!("PRIORITY_FEE: {e}"))?,
             cu_limit_buy: optional("CU_LIMIT_BUY", &DEFAULT_CU_LIMIT_BUY.to_string()).parse().map_err(|e| format!("CU_LIMIT_BUY: {e}"))?,
             cu_limit_sell: optional("CU_LIMIT_SELL", &DEFAULT_CU_LIMIT_SELL.to_string()).parse().map_err(|e| format!("CU_LIMIT_SELL: {e}"))?,
+            cu_limit_amm_buy: optional("CU_LIMIT_AMM_BUY", &DEFAULT_CU_LIMIT_AMM_BUY.to_string()).parse().map_err(|e| format!("CU_LIMIT_AMM_BUY: {e}"))?,
+            cu_limit_amm_sell: optional("CU_LIMIT_AMM_SELL", &DEFAULT_CU_LIMIT_AMM_SELL.to_string()).parse().map_err(|e| format!("CU_LIMIT_AMM_SELL: {e}"))?,
             socket_path: optional("SOCKET_PATH", DEFAULT_SOCKET_PATH),
             trailing_stop_bps: parse_fixed(&optional("TRAILING_STOP", "0.25"), 4).map_err(|e| format!("TRAILING_STOP: {e}"))?,
             exit_slippage_pct: optional("EXIT_SLIPPAGE_PCT", "40").parse().map_err(|e| format!("EXIT_SLIPPAGE_PCT: {e}"))?,
@@ -215,6 +223,8 @@ impl Config {
             priority_fee: Auto::Fixed(0),
             cu_limit_buy: DEFAULT_CU_LIMIT_BUY,
             cu_limit_sell: DEFAULT_CU_LIMIT_SELL,
+            cu_limit_amm_buy: DEFAULT_CU_LIMIT_AMM_BUY,
+            cu_limit_amm_sell: DEFAULT_CU_LIMIT_AMM_SELL,
             socket_path: String::new(),
             trailing_stop_bps: 2_500,
             exit_slippage_pct: 40,

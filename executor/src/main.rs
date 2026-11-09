@@ -28,6 +28,7 @@ mod jito;
 mod journal;
 mod pda;
 mod position;
+mod pumpswap;
 mod rpc;
 mod selfcheck;
 mod sender;
@@ -72,6 +73,9 @@ pub struct Executor {
     pub submitter: Arc<Submitter>,
     pub positions: PositionManager,
     state: RwLock<(Global, FeeConfig)>,
+    amm_state: RwLock<(pumpswap::GlobalConfig, pumpswap::AmmFeeConfig)>,
+    /// Mints whose graduated curve → pool move is in flight (monitor dedup).
+    pub migrating: std::sync::Mutex<std::collections::HashSet<Pubkey>>,
 }
 
 /// Mint `supply` (offset 36) — same for SPL Token and Token-2022.
@@ -102,6 +106,10 @@ impl Executor {
         self.state.read().unwrap().clone()
     }
 
+    pub fn amm_state(&self) -> (pumpswap::GlobalConfig, pumpswap::AmmFeeConfig) {
+        self.amm_state.read().unwrap().clone()
+    }
+
     fn spawn_state_refresher(self: &Arc<Self>) {
         let me = Arc::clone(self);
         tokio::spawn(async move {
@@ -118,6 +126,10 @@ impl Executor {
                         *cur = st;
                     }
                     Err(e) => log_warn!("pump state refresh failed: {e}"),
+                }
+                match pumpswap::fetch_configs(&me.rpc).await {
+                    Ok(st) => *me.amm_state.write().unwrap() = st,
+                    Err(e) => log_warn!("pumpswap config refresh failed: {e}"),
                 }
             }
         });
@@ -184,11 +196,19 @@ impl Executor {
         res
     }
 
-    /// Priority fee for a tx write-locking `curve`: live p75 (auto) or fixed.
-    async fn cu_price(&self, curve: Pubkey) -> u64 {
+    /// Wallet SOL balance (live only; dry runs don't need it).
+    async fn wallet_balance(&self) -> Result<u64> {
+        if self.cfg.dry_run {
+            return Ok(u64::MAX);
+        }
+        self.rpc.balance(&self.keypair.pubkey()).await
+    }
+
+    /// Priority fee for a tx write-locking all of `accounts` (curve and/or pool).
+    async fn cu_price_for(&self, accounts: &[Pubkey]) -> u64 {
         match self.cfg.priority_fee {
             config::Auto::Fixed(v) => v,
-            auto => match self.rpc.priority_fee_p75(&[curve]).await {
+            auto => match self.rpc.priority_fee_p75(accounts).await {
                 Ok(live) => auto.resolve(live),
                 Err(e) => {
                     log_warn!("priority fee estimate failed ({e}); using minimum");
@@ -198,116 +218,99 @@ impl Executor {
         }
     }
 
-    /// Wallet SOL balance (live only; dry runs don't need it).
-    async fn wallet_balance(&self) -> Result<u64> {
-        if self.cfg.dry_run {
-            return Ok(u64::MAX);
-        }
-        self.rpc.balance(&self.keypair.pubkey()).await
-    }
-
     async fn buy_inner(self: &Arc<Self>, mint: Pubkey, sig: &Signal) -> Result<String> {
         let t0 = Instant::now();
         let curve_key = pda::bonding_curve(&mint);
+        let [pool_key, vault_t22, vault_spl, vault_wsol] = pumpswap::canonical_keys(&mint);
 
-        // One round-trip of latency: accounts ‖ priority fee ‖ (cached) blockhash ‖ balance.
-        let keys = [curve_key, mint];
+        // ONE round-trip for both venues: curve, mint, canonical pool and its vaults
+        // ‖ priority fee ‖ (cached) blockhash ‖ balance.
+        let keys = [curve_key, mint, pool_key, vault_t22, vault_spl, vault_wsol];
+        let hot = [curve_key, pool_key];
         let (accs, cu_price, blockhash, balance) = tokio::join!(
             self.rpc.get_multiple_accounts(&keys),
-            self.cu_price(curve_key),
+            self.cu_price_for(&hot),
             self.rpc.latest_blockhash(),
             self.wallet_balance()
         );
         let (accs, blockhash, balance) = (accs?, blockhash?, balance?);
         let fetch_ms = t0.elapsed().as_millis();
 
-        let curve_acc = accs[0].as_ref().ok_or("bonding curve not found (not a pump.fun mint?)")?;
-        if curve_acc.owner != pda::PUMP_PROGRAM {
-            return Err(format!("bonding curve owned by {}, not pump.fun", curve_acc.owner).into());
-        }
         let mint_acc = accs[1].as_ref().ok_or("mint account not found")?;
         let token_program = mint_acc.owner;
         if token_program != pda::TOKEN_PROGRAM && token_program != pda::TOKEN_2022_PROGRAM {
             return Err(format!("mint owned by unknown program {token_program}").into());
         }
         let supply = mint_supply(&mint_acc.data)?;
-        let curve = BondingCurve::parse(&curve_acc.data)?;
-        if curve.complete {
-            return Err("token graduated (bonding curve complete)".into());
-        }
-        if !curve.is_sol_quoted() {
-            // Seen on mainnet (2026-11): such chains end in xStocks (Xs… Token-2022 mints),
-            // which no pump route can reach from SOL. `--inspect <MINT>` shows the chain.
-            return Err(format!("curve is quoted in {} (not SOL) — not reachable from SOL; see --inspect", curve.quote_mint).into());
-        }
-        if curve.is_cashback_coin {
-            return Err("cashback coin: v3 trades refuse it (CashbackCoinNotSupported)".into());
-        }
-        // Mayhem coins: verified by --selfcheck round trip (buy → sell all → close) on
-        // mainnet 2026-11-09. They get no synthetic migration; a buy larger than what is
-        // left fails (NotEnoughTokensToBuy) — fine, nothing is spent.
-        if !curve.has_liquidity() {
-            return Err("bonding curve has no liquidity".into());
-        }
-        let mcap = curve.market_cap(supply);
-        if self.cfg.max_mcap_lamports > 0 && mcap > self.cfg.max_mcap_lamports {
-            return Err(format!("market cap {} > MAX_MCAP_SOL {}", fmt_sol_u(mcap), fmt_sol_u(self.cfg.max_mcap_lamports)).into());
-        }
-
-        let (global, fees) = self.pump_state();
-        let amount_in = self.cfg.buy_lamports;
-        let q = bonding::buy_exact_sol_in(&global, &fees, &curve, supply, amount_in)?;
-        let min_out = apply_slippage(q.tokens_out, self.cfg.slippage_pct);
-        let entry_price = curve.after_buy(q.net_in, q.tokens_out).price();
-        let buyback = jito::pick(&global.buyback_fee_recipients);
-        let budget = Budget { cu_limit: self.cfg.cu_limit_buy, cu_price_micro_lamports: cu_price };
+        let curve = match accs[0].as_ref() {
+            Some(a) if a.owner == pda::PUMP_PROGRAM => Some(BondingCurve::parse(&a.data)?),
+            Some(a) => return Err(format!("bonding curve owned by {}, not pump.fun", a.owner).into()),
+            None => None,
+        };
         let tips = self.tips();
         let tip_total: u64 = tips.iter().map(|t| t.1).sum();
-        let cost = q.debit + tip_total + tx_builder::priority_fee_lamports(budget) + SIG_FEE;
+        let user = self.keypair.pubkey();
+        let base = Position {
+            mint, ticker: sig.ticker.clone(), entry_price: 0, token_amount: 0, cost_sol: 0,
+            mint_supply: supply, entry_time: Instant::now(), entry_unix: journal::unix_now(),
+            accounts: MintAccounts::new(mint, &user, token_program),
+            peak_value: 0, rent_lamports: 0, exit_attempts: 0, buy_sig: String::new(),
+            paper_net_in: 0, venue: position::Venue::Curve, paper_amm: None,
+        };
+
+        let plan = match curve {
+            Some(c) if !c.complete => self.plan_curve_buy(&c, base, cu_price, &tips)?,
+            // Graduated (or no curve at all): trade on the canonical PumpSwap pool.
+            _ => {
+                let pool_acc = accs[2].as_ref().ok_or("token graduated but its PumpSwap pool was not found")?;
+                let vaults = [(vault_t22, accs[3].as_ref()), (vault_spl, accs[4].as_ref()), (vault_wsol, accs[5].as_ref())];
+                let market = match pumpswap::AmmMarket::from_accounts(pool_key, pool_acc, &vaults, token_program, supply)? {
+                    Some(m) => m,
+                    None => pumpswap::fetch_market_at(&self.rpc, &pool_key).await?, // non-standard vaults
+                };
+                self.plan_amm_buy(&market, base, cu_price, &tips)?
+            }
+        };
+        let BuyPlan { expected, min_out, budget, mcap, fees, venue_name, build } = plan;
+        let cost = expected.cost_sol;
         let need = cost + ATA_RENT_ESTIMATE + self.cfg.min_sol_reserve_lamports;
         if balance < need {
             return Err(format!("wallet balance {} < needed {} (buy + fees + rent + MIN_SOL_RESERVE)", fmt_sol_u(balance), fmt_sol_u(need)).into());
         }
-        let expected = Position {
-            mint, ticker: sig.ticker.clone(), entry_price, token_amount: q.tokens_out, cost_sol: cost,
-            mint_supply: supply, entry_time: Instant::now(), entry_unix: journal::unix_now(),
-            accounts: MintAccounts::new(mint, &self.keypair.pubkey(), token_program),
-            peak_value: 0, rent_lamports: 0, exit_attempts: 0, buy_sig: String::new(),
-            paper_net_in: if self.cfg.dry_run { q.net_in } else { 0 },
-        };
+        if self.cfg.max_mcap_lamports > 0 && mcap > self.cfg.max_mcap_lamports {
+            return Err(format!("market cap {} > MAX_MCAP_SOL {}", fmt_sol_u(mcap), fmt_sol_u(self.cfg.max_mcap_lamports)).into());
+        }
+        let amount_in = self.cfg.buy_lamports;
 
         if self.cfg.dry_run {
             log_trade!(
-                "WOULD BUY ${} {} — {} → ~{} tokens (min {}, fees {} lamports, slip {}%, tips {} lamports, prio {}µL/CU, mcap {}) [state {}ms]",
-                sig.ticker, mint, fmt_sol_u(amount_in), fmt_tokens(q.tokens_out), fmt_tokens(min_out),
-                q.fees, self.cfg.slippage_pct, tip_total, cu_price, fmt_sol_u(mcap), fetch_ms
+                "WOULD BUY ${} {} on {venue_name} — {} → ~{} tokens (min {}, fees {} lamports, slip {}%, tips {} lamports, prio {}µL/CU, mcap {}) [state {}ms]",
+                sig.ticker, mint, fmt_sol_u(amount_in), fmt_tokens(expected.token_amount), fmt_tokens(min_out),
+                fees, self.cfg.slippage_pct, tip_total, cu_price, fmt_sol_u(mcap), fetch_ms
             );
-            let payer = if self.ephemeral { self.sim_payer } else { self.keypair.pubkey() };
-            let sim_accounts = MintAccounts::new(mint, &payer, token_program);
-            let ixs = tx_builder::buy_instructions(&payer, &sim_accounts, &buyback, amount_in, min_out, budget, &tips);
-            self.log_simulation(tx_builder::unsigned(&payer, &ixs, blockhash.hash)?, budget.cu_limit, &sim_accounts).await;
+            let payer = if self.ephemeral { self.sim_payer } else { user };
+            let ixs = build(&payer);
+            self.log_simulation(tx_builder::unsigned(&payer, &ixs, blockhash.hash)?, budget.cu_limit, &MintAccounts::new(mint, &payer, token_program)).await;
             // Paper position so TP/SL/timeout logic and stats can be exercised.
             self.journal_event("buy", json!({"mint": mint.to_string(), "ticker": sig.ticker, "sig": "dry-run",
-                "tokens": q.tokens_out, "cost": cost, "mcap": mcap, "source": sig.source, "confidence": sig.confidence,
-                "lag_ms": signal_lag_ms(sig.timestamp), "dry_run": true}));
+                "venue": venue_name, "tokens": expected.token_amount, "cost": cost, "mcap": mcap, "source": sig.source,
+                "confidence": sig.confidence, "lag_ms": signal_lag_ms(sig.timestamp), "dry_run": true}));
             self.positions.open(expected);
             return Ok("dry-run".into());
         }
 
-        let user = self.keypair.pubkey();
-        let accounts = expected.accounts;
-        let ixs = tx_builder::buy_instructions(&user, &accounts, &buyback, amount_in, min_out, budget, &tips);
+        let ixs = build(&user);
         let tx = tx_builder::sign(&self.keypair, &ixs, blockhash.hash)?;
         let b64 = tx_builder::encode_base64(&tx)?;
         let signature = tx.signatures[0].to_string();
         // ---- point of no return: from here the confirm task owns the slot.
         self.positions.set_pending(&mint, signature.clone(), expected.clone());
         self.journal_event("buy_sent", json!({"mint": mint.to_string(), "ticker": sig.ticker, "sig": signature,
-            "amount_in": amount_in, "min_out": min_out, "tips": tip_total, "cu_price": cu_price, "mcap": mcap,
+            "venue": venue_name, "amount_in": amount_in, "min_out": min_out, "tips": tip_total, "cu_price": cu_price, "mcap": mcap,
             "source": sig.source, "confidence": sig.confidence, "lag_ms": signal_lag_ms(sig.timestamp)}));
         match self.submitter.submit(b64).await {
             Ok(_) => log_trade!(
-                "BUY SENT ${} {} — {} min_out {} tips {} lamports prio {}µL/CU sig {} [signal→send {}ms]",
+                "BUY SENT ${} {} on {venue_name} — {} min_out {} tips {} lamports prio {}µL/CU sig {} [signal→send {}ms]",
                 sig.ticker, short(&mint), fmt_sol_u(amount_in), fmt_tokens(min_out), tip_total,
                 cu_price, signature, t0.elapsed().as_millis()
             ),
@@ -318,6 +321,69 @@ impl Executor {
         let s = signature.clone();
         tokio::spawn(async move { me.confirm_buy(s, blockhash.last_valid_height, expected).await });
         Ok(signature)
+    }
+
+    /// Bonding-curve buy (v3): checks, quote, expected position, tx builder.
+    fn plan_curve_buy(&self, curve: &BondingCurve, base: Position, cu_price: u64, tips: &[(Pubkey, u64)]) -> Result<BuyPlan> {
+        if !curve.is_sol_quoted() {
+            // Seen on mainnet (2026-11): xStocks (Xs…), USDC and other listed mints —
+            // no pump route reaches them from SOL. `--inspect <MINT>` shows the chain.
+            return Err(format!("curve is quoted in {} (not SOL) — not reachable from SOL; see --inspect", curve.quote_mint).into());
+        }
+        if curve.is_cashback_coin {
+            return Err("cashback coin: v3 trades refuse it (CashbackCoinNotSupported)".into());
+        }
+        // Mayhem coins: verified by --selfcheck round trip on mainnet 2026-11-09.
+        if !curve.has_liquidity() {
+            return Err("bonding curve has no liquidity".into());
+        }
+        let (global, fees) = self.pump_state();
+        let amount_in = self.cfg.buy_lamports;
+        let q = bonding::buy_exact_sol_in(&global, &fees, curve, base.mint_supply, amount_in)?;
+        let min_out = apply_slippage(q.tokens_out, self.cfg.slippage_pct);
+        let budget = Budget { cu_limit: self.cfg.cu_limit_buy, cu_price_micro_lamports: cu_price };
+        let cost = q.debit + tips.iter().map(|t| t.1).sum::<u64>() + tx_builder::priority_fee_lamports(budget) + SIG_FEE;
+        let buyback = jito::pick(&global.buyback_fee_recipients);
+        let (mint, tp, tips, supply) = (base.mint, base.accounts.token_program, tips.to_vec(), base.mint_supply);
+        let expected = Position {
+            entry_price: curve.after_buy(q.net_in, q.tokens_out).price(),
+            token_amount: q.tokens_out, cost_sol: cost,
+            paper_net_in: if self.cfg.dry_run { q.net_in } else { 0 },
+            ..base
+        };
+        Ok(BuyPlan {
+            expected, min_out, budget, mcap: curve.market_cap(supply), fees: q.fees, venue_name: "curve",
+            build: Box::new(move |payer: &Pubkey| {
+                let a = MintAccounts::new(mint, payer, tp);
+                tx_builder::buy_instructions(payer, &a, &buyback, amount_in, min_out, budget, &tips)
+            }),
+        })
+    }
+
+    /// PumpSwap buy (v2, wSOL wrapped and unwrapped in the same tx).
+    fn plan_amm_buy(&self, m: &pumpswap::AmmMarket, base: Position, cu_price: u64, tips: &[(Pubkey, u64)]) -> Result<BuyPlan> {
+        m.check_supported()?;
+        let (gc, fc) = self.amm_state();
+        let amount_in = self.cfg.buy_lamports;
+        let q = pumpswap::buy_exact_quote_in(&gc, &fc, m, amount_in)?;
+        let min_out = apply_slippage(q.tokens_out, self.cfg.slippage_pct);
+        let budget = Budget { cu_limit: self.cfg.cu_limit_amm_buy, cu_price_micro_lamports: cu_price };
+        let cost = q.debit + tips.iter().map(|t| t.1).sum::<u64>() + tx_builder::priority_fee_lamports(budget) + SIG_FEE;
+        let buyback = pumpswap::buyback_fee_recipient(&gc, rand_index(gc.buyback_fee_recipients.len()));
+        let mcap = m.market_cap()?.min(u64::MAX as u128) as u64;
+        let (market, tips) = (*m, tips.to_vec());
+        let expected = Position {
+            token_amount: q.tokens_out, cost_sol: cost, venue: position::Venue::from_market(m),
+            paper_amm: if self.cfg.dry_run { Some(q) } else { None },
+            ..base
+        };
+        Ok(BuyPlan {
+            expected, min_out, budget, mcap, fees: q.lp_fee + q.protocol_fee + q.creator_fee, venue_name: "pumpswap",
+            build: Box::new(move |payer: &Pubkey| {
+                let a = pumpswap::AmmAccounts::new(&market, payer);
+                pumpswap::buy_instructions(payer, &a, &buyback, amount_in, min_out, budget, &tips)
+            }),
+        })
     }
 
     /// Token ATA at `confirmed`, retried: (amount, rent lamports) once it holds tokens.
@@ -408,14 +474,9 @@ impl Executor {
     /// Caller must have moved the position to Closing via `begin_close`.
     pub async fn exit_position(self: &Arc<Self>, pos: Position, reason: ExitReason) -> Result<String> {
         if reason == ExitReason::Graduated {
-            log_error!(
-                "${} {} graduated — cannot sell on bonding curve, sell {} tokens on PumpSwap manually. Untracking.",
-                pos.ticker, pos.mint, fmt_tokens(pos.token_amount)
-            );
-            self.journal_event("stranded", json!({"mint": pos.mint.to_string(), "ticker": pos.ticker,
-                "tokens": pos.token_amount, "cost": pos.cost_sol, "reason": "graduated"}));
-            self.positions.release(&pos.mint);
-            return Err("token graduated".into());
+            // The monitor moves graduated positions to their pool; never strand them.
+            self.positions.abort_close(&pos.mint);
+            return Err("token graduated — position moves to its PumpSwap pool".into());
         }
         match self.sell(&pos, reason).await {
             Ok(id) => Ok(id),
@@ -427,73 +488,104 @@ impl Executor {
         }
     }
 
-    async fn sell(self: &Arc<Self>, pos: &Position, reason: ExitReason) -> Result<String> {
-        let a = pos.accounts;
-        let keys = [a.bonding_curve, a.user_ata];
-        // `confirmed`: the token balance decides how much we sell — never trust a lagging node.
-        let (accs, cu_price, blockhash) = tokio::join!(
-            self.rpc.get_multiple_accounts_at(&keys, "confirmed"),
-            self.cu_price(a.bonding_curve),
-            self.rpc.latest_blockhash()
-        );
-        let (accs, blockhash) = (accs?, blockhash?);
-        let curve = BondingCurve::parse(&accs[0].as_ref().ok_or("bonding curve missing")?.data)?;
-        if curve.complete {
-            return Err("curve completed between check and sell".into());
+    /// Amount to sell + rent the close returns: the whole on-chain balance (live) or the
+    /// paper amount. `None` = no tokens left (already closed at 0 by the caller).
+    async fn sell_amount(&self, pos: &Position, reason: ExitReason, ata: Option<&rpc::AccountData>) -> Option<(u64, u64)> {
+        if self.cfg.dry_run {
+            return Some((pos.token_amount, 0));
         }
-        let (amount, rent_back) = if self.cfg.dry_run {
-            (pos.token_amount, 0)
-        } else {
-            match accs[1].as_ref().map(|acc| (acc.token_amount().unwrap_or(0), acc.lamports)) {
-                Some((amt, rent)) if amt > 0 => (amt, rent),
-                _ => match self.read_ata(&a.user_ata, 3).await {
-                    Some(x) => x,
-                    None => {
-                        log_warn!(
-                            "${} {} has no token balance at confirmed (sold elsewhere / earlier sell landed?) — closing at 0, see journal",
-                            pos.ticker, short(&pos.mint)
-                        );
-                        self.record_close(pos, reason, 0, "empty");
-                        return Ok("empty".into());
-                    }
-                },
-            }
-        };
+        match ata.map(|acc| (acc.token_amount().unwrap_or(0), acc.lamports)) {
+            Some((amt, rent)) if amt > 0 => Some((amt, rent)),
+            _ => match self.read_ata(&pos.accounts.user_ata, 3).await {
+                Some(x) => Some(x),
+                None => {
+                    log_warn!(
+                        "${} {} has no token balance at confirmed (sold elsewhere / earlier sell landed?) — closing at 0, see journal",
+                        pos.ticker, short(&pos.mint)
+                    );
+                    self.record_close(pos, reason, 0, "empty");
+                    None
+                }
+            },
+        }
+    }
 
-        let (global, fees) = self.pump_state();
-        let sol_out = bonding::sell_sol_out(&global, &fees, &pos.effective_curve(&curve), pos.mint_supply, amount)?;
+    async fn sell(self: &Arc<Self>, pos: &Position, reason: ExitReason) -> Result<String> {
+        let user = self.keypair.pubkey();
         let slip = position::exit_slippage(&self.cfg, reason, pos.exit_attempts);
-        let min_sol_out = apply_slippage(sol_out, slip);
-        let buyback = jito::pick(&global.buyback_fee_recipients);
-        let budget = Budget { cu_limit: self.cfg.cu_limit_sell, cu_price_micro_lamports: cu_price };
+        // If tokens arrive between our read and the sell (dust), closing the ATA — and with
+        // it the sell — fails; so after two failed attempts sell without closing.
+        let close_ata = pos.exit_attempts < 2;
         let tips = self.tips();
         let tip_total: u64 = tips.iter().map(|t| t.1).sum();
-        let rent_back = if pos.exit_attempts < 2 { rent_back } else { 0 }; // see close_ata below
+
+        // `confirmed`: the token balance decides how much we sell — never trust a lagging node.
+        let (ixs, sol_out, amount, rent_back, budget, blockhash) = match pos.venue {
+            position::Venue::Curve => {
+                let a = pos.accounts;
+                let keys = [a.bonding_curve, a.user_ata];
+                let (accs, cu_price, blockhash) = tokio::join!(
+                    self.rpc.get_multiple_accounts_at(&keys, "confirmed"),
+                    self.cu_price_for(&keys[..1]),
+                    self.rpc.latest_blockhash()
+                );
+                let (accs, blockhash) = (accs?, blockhash?);
+                let curve = BondingCurve::parse(&accs[0].as_ref().ok_or("bonding curve missing")?.data)?;
+                if curve.complete {
+                    return Err("curve completed — moving the position to its PumpSwap pool".into());
+                }
+                let Some((amount, rent)) = self.sell_amount(pos, reason, accs[1].as_ref()).await else { return Ok("empty".into()) };
+                let (global, fees) = self.pump_state();
+                let sol_out = bonding::sell_sol_out(&global, &fees, &pos.effective_curve(&curve), pos.mint_supply, amount)?;
+                let budget = Budget { cu_limit: self.cfg.cu_limit_sell, cu_price_micro_lamports: cu_price };
+                let buyback = jito::pick(&global.buyback_fee_recipients);
+                let ixs = tx_builder::sell_instructions(&user, &a, &buyback, amount, apply_slippage(sol_out, slip), budget, &tips, close_ata);
+                (ixs, sol_out, amount, rent, budget, blockhash)
+            }
+            position::Venue::Amm { pool, base_vault, quote_vault } => {
+                let keys = [pool, base_vault, quote_vault, pos.accounts.user_ata];
+                let (accs, cu_price, blockhash) = tokio::join!(
+                    self.rpc.get_multiple_accounts_at(&keys, "confirmed"),
+                    self.cu_price_for(&keys[..1]),
+                    self.rpc.latest_blockhash()
+                );
+                let (accs, blockhash) = (accs?, blockhash?);
+                let pool_acc = accs[0].as_ref().ok_or("pumpswap pool missing")?;
+                let m = pumpswap::AmmMarket::from_accounts(pool, pool_acc, &[(base_vault, accs[1].as_ref()), (quote_vault, accs[2].as_ref())],
+                    pos.accounts.token_program, pos.mint_supply)?.ok_or("pool vaults missing")?;
+                let Some((amount, rent)) = self.sell_amount(pos, reason, accs[3].as_ref()).await else { return Ok("empty".into()) };
+                let priced = match &pos.paper_amm { Some(q) => m.after_buy(q), None => m };
+                let (gc, fc) = self.amm_state();
+                let sol_out = pumpswap::sell(&gc, &fc, &priced, amount)?.sol_out;
+                let budget = Budget { cu_limit: self.cfg.cu_limit_amm_sell, cu_price_micro_lamports: cu_price };
+                let buyback = pumpswap::buyback_fee_recipient(&gc, rand_index(gc.buyback_fee_recipients.len()));
+                let a = pumpswap::AmmAccounts::new(&m, &user);
+                let ixs = pumpswap::sell_instructions(&user, &a, &buyback, amount, apply_slippage(sol_out, slip), budget, &tips, close_ata);
+                (ixs, sol_out, amount, rent, budget, blockhash)
+            }
+        };
+        let rent_back = if close_ata { rent_back } else { 0 };
+        let min_sol_out = apply_slippage(sol_out, slip);
         let est_proceeds = (sol_out + rent_back) as i128 - (tip_total + tx_builder::priority_fee_lamports(budget) + SIG_FEE) as i128;
+        let venue_name = if pos.venue == position::Venue::Curve { "curve" } else { "pumpswap" };
 
         if self.cfg.dry_run {
             log_trade!(
-                "WOULD SELL ${} {} [{reason}] — {} tokens for ~{} (min {}, slip {slip}%)",
+                "WOULD SELL ${} {} on {venue_name} [{reason}] — {} tokens for ~{} (min {}, slip {slip}%)",
                 pos.ticker, short(&pos.mint), fmt_tokens(amount), fmt_sol_u(sol_out), fmt_sol_u(min_sol_out)
             );
             self.record_close(pos, reason, est_proceeds, "dry-run");
             return Ok("dry-run".into());
         }
 
-        let user = self.keypair.pubkey();
-        // Whole balance → close the ATA in the same tx (rent back). If tokens arrive
-        // between our read and the sell (dust), the close — and with it the sell — fails;
-        // so after two failed attempts sell without closing.
-        let close_ata = pos.exit_attempts < 2;
-        let ixs = tx_builder::sell_instructions(&user, &a, &buyback, amount, min_sol_out, budget, &tips, close_ata);
         let tx = tx_builder::sign(&self.keypair, &ixs, blockhash.hash)?;
         let b64 = tx_builder::encode_base64(&tx)?;
         let signature = tx.signatures[0].to_string();
-        self.journal_event("sell_sent", json!({"mint": pos.mint.to_string(), "ticker": pos.ticker, "sig": signature,
+        self.journal_event("sell_sent", json!({"mint": pos.mint.to_string(), "ticker": pos.ticker, "sig": signature, "venue": venue_name,
             "reason": reason.to_string(), "tokens": amount, "min_out": min_sol_out, "slippage_pct": slip, "attempt": pos.exit_attempts}));
         match self.submitter.submit(b64).await {
             Ok(_) => log_trade!(
-                "SELL SENT ${} {} [{reason}] — {} tokens min {} (slip {slip}%) sig {}",
+                "SELL SENT ${} {} on {venue_name} [{reason}] — {} tokens min {} (slip {slip}%) sig {}",
                 pos.ticker, short(&pos.mint), fmt_tokens(amount), fmt_sol_u(min_sol_out), signature
             ),
             Err(e) => log_warn!("SELL submit uncertain ${} {}: {e} — reconciling on-chain", pos.ticker, short(&pos.mint)),
@@ -637,6 +729,24 @@ impl Executor {
     }
 }
 
+/// Everything `buy_inner` needs to send (or paper-trade) a buy on either venue.
+struct BuyPlan {
+    expected: Position,
+    min_out: u64,
+    budget: Budget,
+    mcap: u64,
+    fees: u64,
+    venue_name: &'static str,
+    /// Instructions for a given fee payer (the wallet live, SIM_PAYER in dry runs).
+    build: Box<dyn Fn(&Pubkey) -> Vec<solana_sdk::instruction::Instruction> + Send + Sync>,
+}
+
+/// Cheap index for spreading load over fee-recipient accounts.
+fn rand_index(n: usize) -> usize {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos() as usize;
+    nanos % n.max(1)
+}
+
 fn fmt_tokens(raw: u64) -> String {
     let unit = 10u64.pow(types::TOKEN_DECIMALS);
     format!("{}.{:02}", raw / unit, (raw % unit) / (unit / 100))
@@ -682,6 +792,10 @@ async fn run() -> Result<()> {
     if args.get(1).map(String::as_str) == Some("--selfcheck") {
         let mint = args.get(2).ok_or("usage: mev-streamer-executor --selfcheck <MINT>")?;
         return selfcheck::run(&cfg, mint).await;
+    }
+    if args.get(1).map(String::as_str) == Some("--selfcheck-amm") {
+        let mint = args.get(2).ok_or("usage: mev-streamer-executor --selfcheck-amm <MINT>")?;
+        return selfcheck::run_amm(&cfg, mint).await;
     }
     if args.get(1).map(String::as_str) == Some("--inspect") {
         let mint = args.get(2).ok_or("usage: mev-streamer-executor --inspect <MINT>")?;
@@ -732,7 +846,8 @@ async fn run() -> Result<()> {
 
     let rpc = Arc::new(Rpc::new(cfg.rpc_url.clone()));
     // Warm the blockhash cache, HTTP connection and pump state before accepting signals.
-    let (bh, state) = tokio::join!(rpc.refresh_blockhash(), fetch_state(&rpc));
+    let (bh, state, amm_state) = tokio::join!(rpc.refresh_blockhash(), fetch_state(&rpc), pumpswap::fetch_configs(&rpc));
+    let amm_state = amm_state.map_err(|e| format!("pumpswap config: {e}"))?;
     bh.map_err(|e| format!("initial blockhash fetch: {e}"))?;
     let state = state.map_err(|e| format!("pump state: {e}"))?;
     log_info!(
@@ -765,6 +880,8 @@ async fn run() -> Result<()> {
         rpc,
         submitter,
         state: RwLock::new(state),
+        amm_state: RwLock::new(amm_state),
+        migrating: Default::default(),
         cfg,
     });
     exec.spawn_state_refresher();

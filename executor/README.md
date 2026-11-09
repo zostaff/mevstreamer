@@ -11,6 +11,7 @@ cargo build --release
 ./target/release/mev-streamer-executor                    # serve signals
 ./target/release/mev-streamer-executor --selfcheck MINT   # verify buy/sell + quotes vs mainnet simulation
 ./target/release/mev-streamer-executor --probe-relays     # relay endpoints accept the format (spends nothing)
+./target/release/mev-streamer-executor --selfcheck-amm MINT  # same for a migrated (PumpSwap) token
 ./target/release/mev-streamer-executor --inspect MINT     # quote chain of a curve
 ./target/release/mev-streamer-executor --new-wallet FILE  # fresh hot wallet (secret → FILE, mode 600)
 ```
@@ -24,6 +25,11 @@ Reply: `{"status":"ok","bundle_id":"<signature>"}` or `{"status":"error","messag
 **DRY_RUN=true:** builds the real transaction and simulates it on mainnet (`sigVerify:false`;
 without a key it simulates as `SIM_PAYER`, a funded system wallet), logs CU used and tokens
 received, opens a *paper* position and runs the same TP/SL/timeout logic.
+
+**Venues.** Bonding curve not complete → pump v3; graduated → canonical PumpSwap pool,
+`buy_exact_quote_in_v2` / `sell_v2` with wSOL wrap/unwrap in the same tx (`pumpswap.rs`,
+ported from pump-rust-client 0.5.0). Curve, mint, pool and vaults are read in one RPC call.
+A held curve position that graduates moves to its pool automatically.
 
 **Landing & reconciliation.** A tx is "not landed" only once the block height passes its
 blockhash's `lastValidBlockHeight` (never on a wall-clock timeout); status counts at

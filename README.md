@@ -8,7 +8,7 @@
 ![Jito](https://img.shields.io/badge/Jito%20%2B%20Helius%20Sender-fan--out-1DB954)
 ![GPU](https://img.shields.io/badge/GPU-optional-lightgrey)
 
-**Смотрит livestream, по экрану и голосу ловит момент, когда стример заходит в токен, и покупает его на pump.fun bonding curve — одной подписанной транзакцией, разосланной сразу в Helius Sender и Jito.**
+**Смотрит livestream, по экрану и голосу ловит момент, когда стример заходит в токен, и покупает его на pump.fun — на bonding curve или, если токен уже мигрировал, на PumpSwap — одной подписанной транзакцией, разосланной сразу в Helius Sender и Jito.**
 
 ```
  Stream ──▶ Capture ──▶ OCR + Whisper ──▶ Signal ──▶ pump.fun v3 tx ──▶ Sender ‖ Jito ‖ RPC
@@ -26,7 +26,7 @@
 2. **Vision.** OCR кадра: на macOS — Apple Vision (Neural Engine, ~0.1 с/кадр), иначе EasyOCR. Детектор ищет Solana-адреса и `$TICKER`, UI-распознаватель — платформу и действие стримера. **Опознание без адреса**: с экрана читаются market cap / ликвидность / холдеры (`vision/metrics.py`); если адреса нет, но есть `$TICKER` (или заголовок страницы, напр. «JIMOTHY») и капитализация, резолвер берёт все одноимённые токены и выбирает тот, чья текущая капитализация в ±25% от экранной — только при единственном совпадении (на живом эфире: `$JIMOTHY` из 18 одноимённых за 0.7 с). Такой mint весит 0.40 вместо 0.50. **Восстановление адресов**: если OCR испортил pump-mint (`1→I`, `2→Z`, `o→0`…), генерируются исправления и проверяются на mainnet одним `getMultipleAccounts` (кеш по строке).
 3. **Audio.** faster-whisper с VAD транскрибирует речь, keyword spotter ловит торговые фразы и тикеры.
 4. **Signal.** Скользящие окна (vision 3 с, audio 10 с), скоринг confidence 0…1, cooldown по токену. Защита от ложных входов: mint должен быть виден минимум на 2 кадрах; если на экране несколько разных mint (чат-оверлей) — BUY не отправляется; buy-фраза привязывается только к mint, видимому ±2 с от момента речи; отрицания и «rug/scam/stay away» гасят сигнал. Сигналы только по тикеру (без mint на экране) по умолчанию не отправляются (`ALLOW_TICKER_ONLY`).
-5. **Quote & build.** Executor за один RPC round-trip берёт кривую + минт ‖ priority fee ‖ blockhash (кеш), квотирует `buy_exact_quote_in_v3` с комиссиями из pump-fees `FeeConfig` (тиры по market cap, creator fee, buyback-доля) и собирает v0-транзакцию: compute budget под замеренный расход, idempotent ATA, buy v3, tip'ы.
+5. **Quote & build.** Executor за один RPC round-trip берёт кривую + минт + канонический PumpSwap-пул и его хранилища ‖ priority fee ‖ blockhash (кеш) ‖ баланс. Кривая не завершена → `buy_exact_quote_in_v3` с комиссиями из pump-fees `FeeConfig`; токен мигрировал → PumpSwap `buy_exact_quote_in_v2` (wrap SOL → buy → unwrap в той же tx) с комиссиями LP/protocol/creator по тирам капитализации. Обе квоты — порт официального `pump-rust-client`, сверены симуляцией до лампорта.
 6. **Land.** Одна подписанная tx параллельно уходит во все релеи (Helius Sender, Jito-регионы, RPC) — одна подпись исполняется не более одного раза. Подтверждение — `getSignatureStatuses` каждые 200 мс, засчитывается только `confirmed`. «Не попала» объявляется только когда **высота блока перевалила `lastValidBlockHeight`** — не по таймеру; ошибка релея не считается «не отправлено». Так tx, приземлившаяся позже таймаута, не превращается в неучтённые токены и повторную покупку.
 7. **Manage.** Себестоимость — реальная дельта баланса из приземлившейся tx (комиссии, tip'ы, rent). Выход по **стоимости позиции** (сколько вернёт продажа всего сейчас, с комиссиями) против себестоимости: take-profit, stop-loss, trailing stop от пика, timeout; опрос каждые 400 мс. Продажа — весь баланс + закрытие ATA (возврат ~0.002 SOL rent). Для stop-loss/timeout/повторов slippage растёт до `EXIT_SLIPPAGE_PCT`, чтобы обвал не запер позицию.
 8. **Journal.** Каждое изменение позиции пишется в `logs/positions.json` (атомарно), события — в `logs/trades.jsonl`. После рестарта executor сверяет журнал с on-chain балансами кошелька и продолжает вести позиции; незавершённые покупки дожидается.
@@ -65,7 +65,7 @@ Photon · BullX · GMGN · pump.fun · Dexscreener — по URL/тексту н�
 | Агрегация + скоринг | ~0.1 мс | smoke test |
 | IPC Python → Rust | < 1 мс | smoke test |
 | Executor: состояние кривой + квота + сборка | ~130–150 мс (1 RPC round-trip) | dry-run на mainnet |
-| Round-trip стоимость сделки (buy → sell сразу) | **−2.5%** от входа | комиссии pump 1.25% × 2; `--selfcheck` / paper |
+| Round-trip стоимость сделки (buy → sell сразу) | **−2.5%** кривая / **−0.6…−2%** PumpSwap | комиссии; `--selfcheck` / `--selfcheck-amm` / paper |
 | Отправка: принятие релеем | 115 мс (RPC) … 0.5–0.9 с (Sender / Jito из EU-дома) | `--probe-relays` |
 
 Слоты в mainnet с октября 2026 — 200 мс, blockhash живёт ~30 с; executor обновляет его каждые 2 с и никогда не подписывает хешем старше 10 с.
@@ -100,10 +100,11 @@ mev-streamer/
         ├── journal.rs      positions.json (снапшот) + trades.jsonl (события)
         ├── bonding.rs      BondingCurve/Global/FeeConfig + fee-aware v3 квоты
         ├── tx_builder.rs   buy_exact_quote_in_v3 / sell_v3 (17 аккаунтов), compute budget, tips
+        ├── pumpswap.rs     PumpSwap v2: Pool/GlobalConfig/FeeConfig, квоты, buy/sell с wrap/unwrap SOL
         ├── sender.rs       fan-out: Helius Sender ‖ Jito ‖ RPC, подтверждение по подписи
         ├── jito.rs         Jito sendTransaction (bundleOnly), live tip_floor
         ├── rpc.rs          JSON-RPC: аккаунты, blockhash, priority fee, simulate
-        ├── selfcheck.rs    --selfcheck, --inspect, --probe-relays
+        ├── selfcheck.rs    --selfcheck, --selfcheck-amm, --inspect, --probe-relays
         ├── position.rs     TP / SL / trailing / timeout по стоимости, лимиты сессии
         ├── pda.rs          адреса и PDA (проверяются тестом против seed'ов)
         ├── config.rs       .env → lamports/bps без f64
@@ -125,6 +126,7 @@ IPC — NDJSON по Unix-сокету (`/tmp/mev-streamer.sock`, права 0600
 
 - Квоты — порт референсной математики `pump-rust-client 0.5.0` (MIT). `--selfcheck` на mainnet: **квота buy совпала с симуляцией до единицы токена**; полный выход одной симулированной tx (buy → sell всего → close ATA) — **дельта баланса до лампорта** (проверено на 3 mayhem-коинах, 2026-11-09).
 - Mayhem-коины (а это большинство свежих токенов в выборке 2026-11) поддерживаются; у них нет synthetic migration — слишком большая покупка просто отклоняется.
+- **Мигрировавшие токены (PumpSwap)** — `buy_exact_quote_in_v2` / `sell_v2`. `--selfcheck-amm` на 3 пулах (в т.ч. с ненулевыми virtual reserves и fee buckets): покупка и полный выход **до лампорта**, buy 81–84k CU, round trip 139–143k CU. Позиция на кривой, которая мигрировала во время удержания, автоматически переезжает на пул. Не поддерживаются cashback-пулы (v2 их отклоняет) и пулы не в wSOL.
 - Старые «короткие» аккаунты кривой читаются с нулевым добором (как в официальном декодере).
 - Отказ с понятной причиной: кривая завершена (graduated), кривая квотирована не в SOL, cashback-коин (v3 их не принимает), покупка, пересекающая остаток кривой (synthetic migration), продажа больше реальных резервов кривой.
 
@@ -181,7 +183,8 @@ executor/target/release/mev-streamer-executor --probe-relays     # endpoint'ы �
 | `JITO_URLS` | global engine | executor | несколько регионов через запятую |
 | `SENDER_TIP` / `HELIUS_SENDER_URL` | 0.000005 / global `/fast` | executor | ≥ 0.001 → Sender Max; меньше → автоматически `?swqos_only=true` |
 | `PRIORITY_FEE` | `auto` | executor | auto = p75 недавних комиссий по этой кривой, в `[PRIORITY_FEE_MIN, PRIORITY_FEE_MAX]` µL/CU |
-| `CU_LIMIT_BUY` / `CU_LIMIT_SELL` | 90000 / 60000 | executor | замерено: buy 70–74k, sell 46k CU |
+| `CU_LIMIT_BUY` / `CU_LIMIT_SELL` | 90000 / 60000 | executor | кривая; замерено: buy 70–75k, sell 46k CU |
+| `CU_LIMIT_AMM_BUY` / `CU_LIMIT_AMM_SELL` | 100000 / 75000 | executor | PumpSwap; замерено: buy 81–84k, sell ~58k CU |
 | `TAKE_PROFIT` / `STOP_LOSS` / `TIMEOUT_SEC` | 2.0 / 0.6 / 120 | executor | множители **стоимости позиции** к реальной себестоимости |
 | `TRAILING_STOP` | 0.25 | executor | продать на 25% ниже пика, когда пик ≥ 1.2×; 0 = выкл |
 | `SLIPPAGE_PCT` / `EXIT_SLIPPAGE_PCT` | 15 / 40 | executor | вход и TP / потолок для SL, timeout и повторов |
@@ -219,9 +222,10 @@ Executor лёгкий всегда: время уходит в RPC и сеть. 
 ## Development & debugging
 
 ```bash
-./scripts/check.sh              # cargo test (31), compileall, keyword spotter, mint repair, unit checks (47), smoke test
+./scripts/check.sh              # cargo test (43), compileall, keyword spotter, mint repair, unit checks (56), smoke test
 ./scripts/check.sh --network    # + smoke test с настоящим executor'ом
 executor/target/release/mev-streamer-executor --selfcheck <MINT>   # buy + полный выход против mainnet-симуляции
+executor/target/release/mev-streamer-executor --selfcheck-amm <MINT>  # то же для мигрировавшего токена (PumpSwap)
 executor/target/release/mev-streamer-executor --inspect <MINT>     # цепочка квот, где торгуется каждый уровень
 executor/target/release/mev-streamer-executor --probe-relays       # релеи принимают формат?
 ```
@@ -250,7 +254,7 @@ executor/target/release/mev-streamer-executor --probe-relays       # релеи 
 
 **Не может:**
 - покупать на кривых, квотированных не в SOL (наблюдались только цепочки в xStock'и — из SOL недостижимы);
-- торговать cashback-коины (v3 их отклоняет; новых cashback-коинов не создают) и токены после миграции (PumpSwap) — позиция закрывается как `GRADUATED`, продавать вручную;
+- торговать cashback-коины (v3/v2 их отклоняют; новых не создают);
 - покупку, которая выбирает остаток кривой (synthetic migration) — отклоняется;
 - обогнать задержку самой платформы стрима;
 - надёжно отличить оригинал от копиката по одному тикеру — без адреса покупает только если тикер + экранная капитализация однозначно указывают на один токен;
