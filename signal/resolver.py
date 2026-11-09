@@ -44,6 +44,34 @@ def _is_pump_mint(mint) -> bool:
     return isinstance(mint, str) and mint.endswith("pump")
 
 
+def pick_by_mcap(pairs: list[dict], term: str, mcap_usd: float, tol: float = 0.25) -> tuple[str | None, str]:
+    """DexScreener pairs → единственный токен с символом/именем `term` и капитализацией
+    в ±tol от `mcap_usd`. Капитализация токена — по его самой ликвидной паре."""
+    term = _sym(term)
+    tokens: dict[str, tuple[float, float]] = {}  # mint → (liq, mcap) лучшей пары
+    for p in pairs:
+        base = p.get("baseToken") or {}
+        if p.get("chainId") != "solana":
+            continue
+        if _sym(base.get("symbol")) != term and _sym(base.get("name")) != term:
+            continue
+        mint = base.get("address")
+        mcap = float(p.get("marketCap") or p.get("fdv") or 0)
+        liq = float((p.get("liquidity") or {}).get("usd") or 0)
+        if not mint or mcap <= 0:
+            continue
+        if mint not in tokens or liq > tokens[mint][0]:
+            tokens[mint] = (liq, mcap)
+    if not tokens:
+        return None, "no-token-with-this-symbol"
+    near = [(abs(mc - mcap_usd) / mcap_usd, m) for m, (_, mc) in tokens.items() if abs(mc - mcap_usd) <= tol * mcap_usd]
+    if not near:
+        return None, f"no-mcap-match ({len(tokens)} tokens named ${term})"
+    if len(near) > 1:
+        return None, f"ambiguous ({len(near)} tokens within ±{tol:.0%})"
+    return near[0][1], f"unique of {len(tokens)} ${term} tokens, mcap off {near[0][0]:.0%}"
+
+
 class TokenResolver:
     def __init__(
         self,
@@ -167,6 +195,35 @@ class TokenResolver:
             if liq >= self.min_liquidity_usd and (best is None or liq > best[0]):
                 best = (liq, base.get("address"))
         return best[1] if best else None
+
+    # ------------------------------------------------ ticker + market cap
+
+    async def match_by_mcap(self, term: str, mcap_usd: float, tol: float = 0.25) -> tuple[str | None, str]:
+        """Опознать токен без адреса: среди всех Solana-токенов с символом (или именем)
+        `term` оставить тот, чья текущая капитализация в ±tol от экранной.
+
+        Только однозначный ответ: 0 совпадений → None, ≥2 → None ("ambiguous").
+        Сравниваются ВСЕ одноимённые токены (не только pump), иначе pump-копикат с
+        похожей капитализацией мог бы «выиграть» у настоящего не-pump токена.
+        Возвращает (mint, причина) — mint может оказаться не pump (executor откажет).
+        """
+        term = _sym(term)
+        if not term or mcap_usd <= 0:
+            return None, "bad-input"
+        try:
+            pairs = await self._dex_pairs(term)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            return None, f"dexscreener failed: {e or type(e).__name__}"
+        return pick_by_mcap(pairs, term, mcap_usd, tol)
+
+    async def _dex_pairs(self, query: str) -> list[dict]:
+        session = await self._http()
+        async with session.get(DEXSCREENER_SEARCH_URL, params={"q": query}) as r:
+            r.raise_for_status()
+            data = await r.json(content_type=None)
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected DexScreener reply: {str(data)[:120]}")
+        return [p for p in data.get("pairs") or [] if isinstance(p, dict)]
 
     async def _helius_symbol(self, mint: str) -> str | None:
         session = await self._http()

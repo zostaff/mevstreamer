@@ -41,7 +41,7 @@ if str(_HERE) not in sys.path:
 if str(_ROOT) not in sys.path:
     sys.path.append(str(_ROOT))
 
-from aggregator import SignalAggregator, normalize_audio, normalize_vision  # noqa: E402
+from aggregator import SignalAggregator, VisionObservation, normalize_audio, normalize_vision  # noqa: E402
 from dedup import SignalDedup  # noqa: E402
 from ipc import IPC_SOCKET_PATH, ExecutorClient  # noqa: E402
 from resolver import TokenResolver  # noqa: E402
@@ -68,6 +68,13 @@ def red(t): return _c("31;1", t)
 def cyan(t): return _c("36", t)
 def dim(t): return _c("2", t)
 def bold(t): return _c("1", t)
+
+
+def _fmt_usd(v: float) -> str:
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if v >= div:
+            return f"{v / div:.2f}{suf}"
+    return f"{v:.0f}"
 
 
 class _ColorFormatter(logging.Formatter):
@@ -305,6 +312,9 @@ class Orchestrator:
         self._last_error_log = 0.0
         self._last_lag_warn = 0.0
         self._last_ticker_only_log: dict[str, float] = {}
+        # Опознание без адреса: term ($TICKER или заголовок) → (mint|None, mcap при опознании, ts)
+        self._mcap_ids: dict[str, tuple[str | None, float, float]] = {}
+        self._mcap_inflight: set[str] = set()
         self.exit_code = 0
 
     # ---------------------------------------------------------------- run
@@ -420,6 +430,11 @@ class Orchestrator:
             self.stats.lat("vision", ms)
             try:
                 obs = normalize_vision(raw, ts)
+                metrics = getattr(raw, "metrics", None) or {}
+                if (obs is None or not obs.mints) and metrics.get("market_cap_usd"):
+                    # страница токена без адреса и без $TICKER («JIMOTHY» + MC) — тоже опознаём
+                    obs = self._identify_by_mcap(obs or VisionObservation(timestamp=ts), metrics)
+                    obs = None if obs.empty else obs
                 if obs is not None:
                     log.debug("vision %.0fms: mints=%s tickers=%s platform=%s action=%s",
                               ms, [short_mint(m) for m in obs.mints], obs.tickers, obs.platform, obs.action)
@@ -524,6 +539,59 @@ class Orchestrator:
                      self.stats.frames, cap.frames_dropped.value, self.stats.frames_skipped,
                      self.stats.audio_chunks, cap.reconnects.value, avg("vision"), avg("audio"),
                      self.stats.signals, self.stats.sent, cap.is_alive())
+
+    # ---------------------------------------------------------------- identify
+
+    MCAP_MATCH_FACTOR = 0.8   # вес опознанного mint'а: 0.8 × 0.50 = 0.40 (адрес на экране — 0.50)
+    MCAP_TOL = 0.25           # экранная капитализация vs текущая (задержка стрима, волатильность)
+    MCAP_ID_TTL = 60.0
+    MCAP_NEG_TTL = 20.0
+
+    def _identify_by_mcap(self, obs, metrics: dict):
+        """Адреса нет, но есть тикер (или заголовок страницы) и market cap → опознать
+        токен по паре «имя + капитализация» (фоном) и подставить mint в наблюдение.
+        Мульти-токенные экраны (несколько тикеров) пропускаются — нельзя понять,
+        к какому тикеру относится капитализация."""
+        mcap = metrics.get("market_cap_usd")
+        if not mcap:
+            return obs
+        if len(obs.tickers) == 1:
+            term = obs.tickers[0]
+        elif not obs.tickers and metrics.get("title"):
+            term = str(metrics["title"]).upper()
+        else:
+            return obs
+        now = time.monotonic()
+        hit = self._mcap_ids.get(term)
+        if hit:
+            mint, ref, ts = hit
+            if mint and now - ts < self.MCAP_ID_TTL and abs(mcap - ref) <= self.MCAP_TOL * ref:
+                tickers = obs.tickers or (term,)
+                return replace(obs, mints=(mint,), mint_conf=((mint, self.MCAP_MATCH_FACTOR),), tickers=tickers)
+            if mint is None and now - ts < self.MCAP_NEG_TTL:
+                return obs
+        if term not in self._mcap_inflight:
+            self._mcap_inflight.add(term)
+            task = asyncio.create_task(self._resolve_mcap(term, float(mcap)))
+            self._dispatch_tasks.add(task)
+            task.add_done_callback(self._dispatch_tasks.discard)
+        return obs
+
+    async def _resolve_mcap(self, term: str, mcap: float) -> None:
+        t0 = time.perf_counter()
+        try:
+            mint, why = await self.resolver.match_by_mcap(term, mcap, self.MCAP_TOL)
+            ms = (time.perf_counter() - t0) * 1000
+            self.stats.lat("resolve", ms)
+            self._mcap_ids[term] = (mint, mcap, time.monotonic())
+            if mint:
+                log.info("identified $%s at MC $%s → %s (%s, %.0fms)", term, _fmt_usd(mcap), short_mint(mint), why, ms)
+            else:
+                log.info("cannot identify $%s at MC $%s: %s (%.0fms)", term, _fmt_usd(mcap), why, ms)
+        except Exception:
+            log.exception("mcap identify failed for %s", term)
+        finally:
+            self._mcap_inflight.discard(term)
 
     # ---------------------------------------------------------------- decision
 

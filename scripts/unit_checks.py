@@ -184,5 +184,40 @@ sig = scorer.score(*agg.snapshot(T + 0.4), now=T + 0.4)
 check(sig is not None and abs(sig.components["visual_mint_detected"] - 0.45) < 1e-9,
       "mint weight scaled by confidence (0.9 x 0.50)")
 
+# ---- identify a token without an address: ticker/title + on-screen market cap
+from metrics import extract_metrics, title_candidate  # noqa: E402
+from resolver import pick_by_mcap  # noqa: E402
+
+
+def _blk(text, x1, y1, x2, y2):
+    return {"text": text, "bbox": (x1, y1, x2, y2), "confidence": 1.0}
+
+
+m = extract_metrics([_blk("MC $42.1K Liq $18K Holders 312", 37, 233, 389, 255)])
+check(m == {"market_cap_usd": 42_100, "liquidity_usd": 18_000, "holders": 312}, "metrics inline (Photon row)")
+m = extract_metrics([_blk("$1.3M", 1019, 35, 1110, 75), _blk("MARKET CAP", 1025, 80, 1100, 92),
+                     _blk("$47.4M", 730, 640, 830, 675), _blk("ALL-TIME HIGH", 730, 682, 830, 694)])
+check(m == {"market_cap_usd": 1_300_000}, "metrics: value above label, ATH ignored")
+check(extract_metrics([_blk("ATH $47.4M", 0, 0, 100, 20), _blk("Vol 24h $51.9K", 0, 30, 100, 50)]) == {},
+      "metrics: ATH / volume are not market cap")
+check(title_candidate([_blk("JIMOTHY", 145, 25, 335, 80), _blk("$0.00126", 425, 35, 670, 95),
+                       _blk("LIVE", 1180, 45, 1230, 65)], 720) == "JIMOTHY", "title = largest word on top")
+
+
+def _pair(mint, sym, mcap, liq=1000.0, chain="solana"):
+    return {"chainId": chain, "baseToken": {"address": mint, "symbol": sym, "name": sym},
+            "marketCap": mcap, "liquidity": {"usd": liq}}
+
+
+pairs = [_pair("A1pump", "CAT", 1_250_000), _pair("B2pump", "CAT", 40_000), _pair("C3pump", "CAT", 9_000_000),
+         _pair("D4", "CAT", 1_200_000, chain="ethereum")]
+check(pick_by_mcap(pairs, "CAT", 1_300_000)[0] == "A1pump", "mcap match picks the one CAT at ~$1.3M")
+check(pick_by_mcap(pairs, "CAT", 300_000)[0] is None, "no CAT near $300K -> none")
+check(pick_by_mcap(pairs + [_pair("E5pump", "CAT", 1_400_000)], "CAT", 1_300_000)[0] is None,
+      "two CATs within tolerance -> ambiguous, none")
+check(pick_by_mcap(pairs, "DOG", 1_300_000)[0] is None, "other symbol -> none")
+check(pick_by_mcap([_pair("A1pump", "CAT", 1_250_000, liq=10), _pair("A1pump", "CAT", 5_000_000, liq=900)],
+                   "CAT", 1_300_000)[0] is None, "token mcap taken from its most liquid pair")
+
 print(f"unit checks: {passed} passed, {len(failures)} failed")
 sys.exit(1 if failures else 0)

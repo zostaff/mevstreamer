@@ -13,12 +13,14 @@ from dataclasses import asdict, dataclass, field
 try:
     from .config import VisionConfig
     from .detector import TokenDetector
+    from .metrics import extract_metrics, title_candidate
     from .mint_repair import MintVerifier
     from .ocr import DEFAULT_ROIS, FULL_FRAME_ROIS, OCREngine, frame_to_array, resolve_engine
     from .ui_recognizer import UIRecognizer
 except ImportError:  # python pipeline.py из папки vision/
     from config import VisionConfig
     from detector import TokenDetector
+    from metrics import extract_metrics, title_candidate
     from mint_repair import MintVerifier
     from ocr import DEFAULT_ROIS, FULL_FRAME_ROIS, OCREngine, frame_to_array, resolve_engine
     from ui_recognizer import UIRecognizer
@@ -34,6 +36,8 @@ class VisionResult:
     timestamp: float
     processing_ms: float
     timings_ms: dict = field(default_factory=dict)
+    # market_cap_usd / liquidity_usd / holders с экрана — для опознания токена без адреса
+    metrics: dict = field(default_factory=dict)
     text_blocks: list[dict] = field(default_factory=list)  # сырой OCR — для отладки
 
     def to_dict(self, include_text: bool = False) -> dict:
@@ -79,6 +83,11 @@ class VisionPipeline:
         t = time.perf_counter()
         addresses = self.detector.find_addresses(blocks)
         tickers = self.detector.find_tickers(blocks)
+        metrics: dict = extract_metrics(blocks)
+        if "market_cap_usd" in metrics:
+            title = title_candidate(blocks, h)
+            if title:
+                metrics["title"] = title
         timings["detect"] = _ms(t)
 
         # OCR испортил mint (1→I, 2→Z, …): восстановить и проверить on-chain (кеш по строке).
@@ -111,6 +120,7 @@ class VisionPipeline:
             timestamp=ts,
             processing_ms=_ms(t0),
             timings_ms=timings,
+            metrics=metrics,
             text_blocks=blocks,
         )
 
@@ -172,6 +182,7 @@ def _main(argv=None) -> int:
     print("\nАдреса:")
     for a in result.addresses or [None]:
         print(f"  {a['type']:<6} {a['confidence']:.2f}  {a['address']}  ({a['source']})" if a else "  —")
+    print(f"Метрики: {result.metrics or '—'}")
     print("Тикеры:")
     for tk in result.tickers or [None]:
         print(f"  {tk['confidence']:.2f}  ${tk['ticker']}" if tk else "  —")
