@@ -1,0 +1,212 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1244" height="284" viewBox="0 0 1244 284"><defs><radialGradient id="bg" cx="0.5" cy="0" r="1.15"><stop offset="0" stop-color="#140a2a"/><stop offset="1" stop-color="#07040f"/></radialGradient><filter id="glow" x="-5%" y="-20%" width="110%" height="140%"><feGaussianBlur stdDeviation="1.6" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter><pattern id="scan" width="4" height="3" patternUnits="userSpaceOnUse"><rect width="4" height="1" fill="#000" fill-opacity="0.22"/></pattern></defs><rect x="0.5" y="0.5" width="1243" height="283" rx="14" fill="url(#bg)" stroke="#2a1850"/><g font-family="Menlo,Consolas,'DejaVu Sans Mono','Liberation Mono','Courier New',monospace" font-size="13.4" font-weight="700" xml:space="preserve" filter="url(#glow)">
+<text y="34.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0" fill="#f1eaff">SIGNAL</tspan><tspan x="94.0 102.0 110.0 118.0 126.0" fill="#f1eaff">SCORE</tspan><tspan x="150.0 158.0 166.0" fill="#8a7bb5">sum</tspan><tspan x="182.0 190.0 198.0 206.0 214.0 222.0 230.0" fill="#8a7bb5">clipped</tspan><tspan x="246.0 254.0" fill="#8a7bb5">to</tspan><tspan x="270.0 278.0 286.0" fill="#8a7bb5">1.0</tspan><tspan x="302.0" fill="#8a7bb5">·</tspan><tspan x="318.0 326.0 334.0 342.0 350.0 358.0 366.0" fill="#8a7bb5">execute</tspan><tspan x="382.0 390.0" fill="#8a7bb5">at</tspan><tspan x="406.0 414.0 422.0 430.0" fill="#14F195">0.70</tspan></text>
+
+<text y="66.2"><tspan x="38.0 46.0 54.0 62.0" fill="#d9ccff">mint</tspan><tspan x="78.0 86.0" fill="#d9ccff">on</tspan><tspan x="102.0 110.0 118.0 126.0 134.0 142.0 150.0" fill="#d9ccff">screen,</tspan><tspan x="166.0 174.0" fill="#d9ccff">≥2</tspan><tspan x="190.0 198.0 206.0 214.0 222.0 230.0" fill="#d9ccff">frames</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0" fill="#9945FF">VISION</tspan></text><rect x="454.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="462.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="470.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="478.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="486.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="494.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="502.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="510.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="518.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="526.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="534.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="542.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="550.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="558.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="566.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="574.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="582.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="590.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="598.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="606.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="614.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="622.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="630.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="638.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="646.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="654.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="662.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="670.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="678.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="686.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="694.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="702.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="710.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="718.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="726.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="734.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="742.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="750.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="758.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="766.0" y="54.0" width="8.3" height="16.3" fill="#9945FF"/>
+<text y="66.2"><tspan x="782.0 790.0 798.0 806.0 814.0" fill="#f1eaff">+0.50</tspan></text>
+<text y="82.2"><tspan x="38.0 46.0 54.0 62.0" fill="#d9ccff">mint</tspan><tspan x="78.0 86.0 94.0 102.0 110.0 118.0 126.0 134.0 142.0 150.0" fill="#d9ccff">identified</tspan><tspan x="166.0 174.0" fill="#d9ccff">by</tspan><tspan x="190.0 198.0 206.0 214.0 222.0 230.0" fill="#d9ccff">ticker</tspan><tspan x="246.0" fill="#d9ccff">+</tspan><tspan x="262.0 270.0 278.0 286.0 294.0 302.0" fill="#d9ccff">market</tspan><tspan x="318.0 326.0 334.0" fill="#d9ccff">cap</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0" fill="#b78cff">VISION</tspan></text><rect x="454.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="462.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="470.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="478.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="486.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="494.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="502.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="510.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="518.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="526.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="534.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="542.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="550.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="558.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="566.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="574.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="582.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="590.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="598.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="606.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="614.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="622.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="630.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="638.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="646.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="654.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="662.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="670.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="678.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="686.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="694.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="702.0" y="70.0" width="8.3" height="16.3" fill="#b78cff"/>
+<text y="82.2"><tspan x="718.0 726.0 734.0 742.0 750.0" fill="#f1eaff">+0.40</tspan></text>
+<text y="98.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0 86.0" fill="#d9ccff">$TICKER</tspan><tspan x="102.0 110.0" fill="#d9ccff">on</tspan><tspan x="126.0 134.0 142.0 150.0 158.0 166.0" fill="#d9ccff">screen</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0" fill="#b78cff">VISION</tspan></text><rect x="454.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="462.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="470.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="478.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="486.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="494.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="502.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="510.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="518.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="526.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="534.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="542.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="550.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="558.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="566.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="574.0" y="86.0" width="8.3" height="16.3" fill="#b78cff"/>
+<text y="98.2"><tspan x="590.0 598.0 606.0 614.0 622.0" fill="#f1eaff">+0.20</tspan></text>
+<text y="114.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0 86.0" fill="#d9ccff">trading</tspan><tspan x="102.0 110.0 118.0 126.0 134.0 142.0 150.0 158.0" fill="#d9ccff">platform</tspan><tspan x="174.0 182.0 190.0 198.0 206.0 214.0 222.0 230.0 238.0 246.0" fill="#d9ccff">recognised</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0" fill="#b78cff">VISION</tspan></text><rect x="454.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="462.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="470.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="478.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="486.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="494.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="502.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="510.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="518.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="526.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="534.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<rect x="542.0" y="102.0" width="8.3" height="16.3" fill="#b78cff"/>
+<text y="114.2"><tspan x="558.0 566.0 574.0 582.0 590.0" fill="#f1eaff">+0.15</tspan></text>
+<text y="130.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0 86.0 94.0" fill="#d9ccff">streamer</tspan><tspan x="110.0 118.0" fill="#d9ccff">on</tspan><tspan x="134.0 142.0 150.0" fill="#d9ccff">Buy</tspan><tspan x="166.0 174.0 182.0 190.0 198.0 206.0" fill="#d9ccff">button</tspan><tspan x="222.0" fill="#d9ccff">/</tspan><tspan x="238.0 246.0 254.0 262.0 270.0 278.0" fill="#d9ccff">bought</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0" fill="#9945FF">VISION</tspan></text><rect x="454.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="462.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="470.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="478.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="486.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="494.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="502.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="510.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="518.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="526.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="534.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="542.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="550.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="558.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="566.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="574.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="582.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="590.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="598.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="606.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="614.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="622.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="630.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="638.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="646.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="654.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="662.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="670.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="678.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="686.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="694.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<rect x="702.0" y="118.0" width="8.3" height="16.3" fill="#9945FF"/>
+<text y="130.2"><tspan x="718.0 726.0 734.0 742.0 750.0" fill="#f1eaff">+0.40</tspan></text>
+<text y="146.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0 86.0 94.0 102.0 110.0" fill="#d9ccff">buy-phrase</tspan><tspan x="126.0 134.0" fill="#d9ccff">in</tspan><tspan x="150.0 158.0 166.0 174.0 182.0 190.0" fill="#d9ccff">speech</tspan><tspan x="374.0 382.0 390.0 398.0 406.0" fill="#00C2FF">AUDIO</tspan></text><rect x="454.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="462.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="470.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="478.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="486.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="494.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="502.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="510.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="518.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="526.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="534.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="542.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="550.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="558.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="566.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="574.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="582.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="590.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="598.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="606.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="614.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="622.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="630.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="638.0" y="134.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<text y="146.2"><tspan x="654.0 662.0 670.0 678.0 686.0" fill="#f1eaff">+0.30</tspan></text>
+<text y="162.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0" fill="#d9ccff">ticker</tspan><tspan x="94.0 102.0" fill="#d9ccff">in</tspan><tspan x="118.0 126.0 134.0 142.0 150.0 158.0" fill="#d9ccff">speech</tspan><tspan x="374.0 382.0 390.0 398.0 406.0" fill="#00C2FF">AUDIO</tspan></text><rect x="454.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="462.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="470.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="478.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="486.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="494.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="502.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="510.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="518.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="526.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="534.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<rect x="542.0" y="150.0" width="8.3" height="16.3" fill="#00C2FF"/>
+<text y="162.2"><tspan x="558.0 566.0 574.0 582.0 590.0" fill="#f1eaff">+0.15</tspan></text>
+<text y="178.2"><tspan x="38.0 46.0 54.0 62.0" fill="#d9ccff">both</tspan><tspan x="78.0 86.0 94.0 102.0 110.0 118.0 126.0 134.0" fill="#d9ccff">channels</tspan><tspan x="150.0 158.0 166.0 174.0 182.0" fill="#d9ccff">agree</tspan><tspan x="198.0 206.0" fill="#d9ccff">on</tspan><tspan x="222.0 230.0 238.0" fill="#d9ccff">one</tspan><tspan x="254.0 262.0 270.0 278.0 286.0" fill="#d9ccff">token</tspan><tspan x="374.0 382.0 390.0 398.0" fill="#14F195">BOTH</tspan></text><rect x="454.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="462.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="470.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="478.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="486.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="494.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="502.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="510.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="518.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="526.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="534.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="542.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="550.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="558.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="566.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<rect x="574.0" y="166.0" width="8.3" height="16.3" fill="#14F195"/>
+<text y="178.2"><tspan x="590.0 598.0 606.0 614.0 622.0" fill="#f1eaff">+0.20</tspan></text>
+<text y="194.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0" fill="#d9ccff">ticker</tspan><tspan x="94.0 102.0 110.0 118.0 126.0 134.0 142.0" fill="#d9ccff">without</tspan><tspan x="158.0 166.0 174.0 182.0" fill="#d9ccff">mint</tspan><tspan x="198.0 206.0 214.0 222.0 230.0 238.0 246.0 254.0" fill="#d9ccff">(copycat</tspan><tspan x="270.0 278.0 286.0 294.0 302.0" fill="#d9ccff">risk)</tspan><tspan x="374.0 382.0 390.0 398.0 406.0 414.0 422.0" fill="#ff4d6d">PENALTY</tspan></text><rect x="454.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="462.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="470.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="478.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="486.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="494.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="502.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="510.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="518.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="526.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="534.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<rect x="542.0" y="182.0" width="8.3" height="16.3" fill="#ff4d6d" fill-opacity="0.75"/>
+<text y="194.2"><tspan x="558.0 566.0 574.0 582.0 590.0" fill="#ff4d6d">-0.15</tspan></text>
+
+<text y="226.2"><tspan x="38.0 46.0 54.0 62.0" fill="#8a7bb5">mint</tspan><tspan x="78.0" fill="#8a7bb5">+</tspan><tspan x="94.0 102.0 110.0 118.0 126.0 134.0 142.0 150.0" fill="#8a7bb5">platform</tspan><tspan x="166.0" fill="#8a7bb5">+</tspan><tspan x="182.0 190.0 198.0 206.0 214.0 222.0 230.0 238.0 246.0 254.0" fill="#8a7bb5">buy-phrase</tspan><tspan x="270.0" fill="#8a7bb5">=</tspan><tspan x="286.0 294.0 302.0 310.0" fill="#7dffb8">0.95</tspan><tspan x="326.0" fill="#7dffb8">→</tspan><tspan x="342.0 350.0 358.0" fill="#7dffb8">BUY</tspan><tspan x="414.0 422.0 430.0 438.0" fill="#8a7bb5">only</tspan><tspan x="454.0 462.0 470.0 478.0 486.0 494.0 502.0 510.0 518.0 526.0" fill="#8a7bb5">buy-phrase</tspan><tspan x="542.0" fill="#8a7bb5">+</tspan><tspan x="558.0 566.0 574.0 582.0 590.0 598.0" fill="#8a7bb5">ticker</tspan><tspan x="614.0 622.0" fill="#8a7bb5">in</tspan><tspan x="638.0 646.0 654.0 662.0 670.0 678.0" fill="#8a7bb5">speech</tspan><tspan x="694.0" fill="#8a7bb5">=</tspan><tspan x="710.0 718.0 726.0 734.0" fill="#ff4d6d">0.30</tspan><tspan x="750.0" fill="#ff4d6d">→</tspan><tspan x="766.0 774.0" fill="#ff4d6d">no</tspan></text>
+<text y="242.2"><tspan x="38.0 46.0 54.0 62.0 70.0 78.0" fill="#4a3d73">"let's</tspan><tspan x="94.0 102.0 110.0 118.0" fill="#4a3d73">go",</tspan><tspan x="134.0 142.0 150.0 158.0" fill="#4a3d73">"I'm</tspan><tspan x="174.0 182.0 190.0" fill="#4a3d73">in"</tspan><tspan x="206.0 214.0 222.0" fill="#4a3d73">are</tspan><tspan x="238.0 246.0 254.0" fill="#4a3d73">not</tspan><tspan x="270.0 278.0 286.0 294.0 302.0 310.0 318.0 326.0 334.0 342.0 350.0" fill="#4a3d73">buy-phrases</tspan><tspan x="366.0" fill="#4a3d73">·</tspan><tspan x="382.0 390.0 398.0 406.0 414.0 422.0 430.0 438.0 446.0" fill="#4a3d73">negations</tspan><tspan x="462.0 470.0 478.0" fill="#4a3d73">and</tspan><tspan x="494.0 502.0 510.0 518.0 526.0 534.0 542.0 550.0 558.0 566.0 574.0 582.0 590.0" fill="#4a3d73">rug/scam/stay</tspan><tspan x="606.0 614.0 622.0 630.0" fill="#4a3d73">away</tspan><tspan x="646.0 654.0 662.0 670.0" fill="#4a3d73">kill</tspan><tspan x="686.0 694.0 702.0" fill="#4a3d73">the</tspan><tspan x="718.0 726.0 734.0 742.0 750.0 758.0" fill="#4a3d73">signal</tspan></text>
+</g><rect x="0.5" y="0.5" width="1243" height="283" rx="14" fill="url(#scan)" pointer-events="none"/></svg>
