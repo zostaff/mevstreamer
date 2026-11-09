@@ -1,12 +1,12 @@
-# Python-часть mev-streamer. Код запускается прямо из репозитория
-# (scripts/*.sh → .venv/bin/python signal/orchestrator.py), этот файл описывает
-# зависимости и метаданные:
+# Python part of mev-streamer. Code runs straight from the repo
+# (scripts/*.sh → .venv/bin/python signal/orchestrator.py); this file declares
+# dependencies and metadata:
 #
-#   pip install .            # core: ingestion + signal (без OCR/Whisper)
-#   pip install ".[ml]"      # + easyocr, faster-whisper — нужно для реального стрима
+#   pip install .            # core: ingestion + signal (no OCR/Whisper)
+#   pip install ".[ml]"      # + easyocr, faster-whisper — required for a real stream
 #
-# Пакеты НЕ устанавливаются в site-packages намеренно: модуль signal/ при установке
-# затенил бы stdlib `signal` для всего окружения.
+# Packages are deliberately NOT installed into site-packages: once installed, the
+# signal/ module would shadow the stdlib `signal` for the whole environment.
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -17,7 +17,7 @@ name = "mev-streamer"
 version = "0.1.0"
 description = "Real-time trading-signal detection from livestreams (OCR + speech) with Solana execution via Jito"
 readme = "README.md"
-requires-python = ">=3.11"   # orchestrator полагается на PYTHONSAFEPATH (3.11+)
+requires-python = ">=3.11"   # orchestrator relies on PYTHONSAFEPATH (3.11+)
 dependencies = [
     "numpy>=1.26",
     "python-dotenv>=1.0",

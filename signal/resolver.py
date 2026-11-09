@@ -1,22 +1,22 @@
-"""Тикер → mint address.
+"""Ticker → mint address.
 
-Цепочка источников:
-  1. Jupiter Tokens API v2 (бесплатно, без ключа):
+Source chain:
+  1. Jupiter Tokens API v2 (free, no key):
        GET https://lite-api.jup.ag/tokens/v2/search?query=PEPE
-     Старый https://token.jup.ag/strict Jupiter отключил — он больше не отвечает.
-  2. DexScreener search (бесплатно) — ловит свежие pump.fun токены, которых
-     ещё нет в Jupiter.
-  3. Helius DAS (если есть ключ): у DAS нет поиска по символу, поэтому он
-     используется для проверки кандидата из DexScreener — getAsset по mint,
-     символ on-chain должен совпасть с тикером.
+     Jupiter shut down the old https://token.jup.ag/strict; it no longer responds.
+  2. DexScreener search (free): catches fresh pump.fun tokens not
+     yet in Jupiter.
+  3. Helius DAS (if a key is set): DAS has no symbol search, so it is
+     used to verify the DexScreener candidate: getAsset by mint,
+     the on-chain symbol must match the ticker.
 
-Выбор среди одноимённых токенов (копикаты — норма для мемкоинов):
-  verified → наибольшая ликвидность. Это эвристика: ticker-only резолв
-  в принципе может указать не на тот токен, который имеет в виду стример,
-  поэтому оркестратор по умолчанию НЕ шлёт ticker-only BUY (ALLOW_TICKER_ONLY).
-  Принимаются только pump.fun mint'ы (адрес оканчивается на "pump") — executor
-  всё равно умеет торговать лишь pump.fun кривые; позитивный кеш — 60 с
-  (за час «победитель» среди копикатов меняется).
+Choosing among same-name tokens (copycats are the norm for memecoins):
+  verified → highest liquidity. This is a heuristic: a ticker-only resolve
+  can in principle point at a different token than the streamer means,
+  so by default the orchestrator does NOT send ticker-only BUYs (ALLOW_TICKER_ONLY).
+  Only pump.fun mints (address ending in "pump") are accepted; the executor
+  can only trade pump.fun curves anyway. Positive cache TTL is 60 s
+  (the winning copycat changes within an hour).
 """
 
 from __future__ import annotations
@@ -35,20 +35,20 @@ HELIUS_RPC_URL = "https://mainnet.helius-rpc.com/"
 
 
 def _sym(symbol) -> str:
-    """У части токенов символ записан как "$WIF" — сравниваем без "$"."""
+    """Some tokens store the symbol as "$WIF"; compare without the "$"."""
     return str(symbol or "").strip().lstrip("$").upper()
 
 
 def _is_pump_mint(mint) -> bool:
-    """pump.fun mint'ы (vanity-суффикс "pump") — единственное, что торгует executor."""
+    """pump.fun mints (vanity suffix "pump") are the only thing the executor trades."""
     return isinstance(mint, str) and mint.endswith("pump")
 
 
 def pick_by_mcap(pairs: list[dict], term: str, mcap_usd: float, tol: float = 0.25) -> tuple[str | None, str]:
-    """DexScreener pairs → единственный токен с символом/именем `term` и капитализацией
-    в ±tol от `mcap_usd`. Капитализация токена — по его самой ликвидной паре."""
+    """DexScreener pairs → the single token with symbol/name `term` and market cap
+    within ±tol of `mcap_usd`. A token's market cap is taken from its most liquid pair."""
     term = _sym(term)
-    tokens: dict[str, tuple[float, float]] = {}  # mint → (liq, mcap) лучшей пары
+    tokens: dict[str, tuple[float, float]] = {}  # mint → (liq, mcap) of the best pair
     for p in pairs:
         base = p.get("baseToken") or {}
         if p.get("chainId") != "solana":
@@ -84,7 +84,7 @@ class TokenResolver:
         self.helius_api_key = helius_api_key or None
         self.timeout = aiohttp.ClientTimeout(total=timeout_sec)
         self.cache_ttl_sec = cache_ttl_sec
-        # Негативный кеш короткий: свежий токен может появиться через минуту
+        # Negative cache is short: a fresh token may appear a minute later
         self.negative_ttl_sec = negative_ttl_sec
         self.min_liquidity_usd = min_liquidity_usd
         self._cache: dict[str, tuple[str | None, float, str]] = {}  # TICKER → (mint, ts, source)
@@ -114,15 +114,15 @@ class TokenResolver:
         return (await self.resolve_ticker(ticker))[0]
 
     async def resolve_ticker(self, ticker: str) -> tuple[str | None, str]:
-        """→ (mint | None, source). source возвращается per-call (не общий атрибут),
-        чтобы параллельные резолвы не перетирали друг другу источник."""
+        """→ (mint | None, source). source is returned per call (not a shared attribute)
+        so concurrent resolves don't overwrite each other's source."""
         ticker = ticker.strip().lstrip("$").upper()
         if not ticker:
             return None, "empty"
         hit = self.cached(ticker)
         if hit is not None:
             return hit[0], f"cache:{hit[1]}"
-        # Параллельные запросы одного тикера — один HTTP-поход
+        # Concurrent lookups of one ticker share a single HTTP request
         task = self._inflight.get(ticker)
         if task is None:
             task = asyncio.create_task(self._resolve_and_cache(ticker))
@@ -144,7 +144,7 @@ class TokenResolver:
             if self.helius_api_key:
                 symbol = await self._safe(self._helius_symbol, mint)
                 if symbol is not None and _sym(symbol) != ticker:
-                    log.warning("helius: %s symbol=%r ≠ $%s — отклонено", mint, symbol, ticker)
+                    log.warning("helius: %s symbol=%r ≠ $%s — rejected", mint, symbol, ticker)
                     return None, "helius-mismatch"
                 return mint, "dexscreener+helius" if symbol else "dexscreener"
             return mint, "dexscreener"
@@ -162,7 +162,7 @@ class TokenResolver:
         async with session.get(JUP_SEARCH_URL, params={"query": ticker}) as r:
             r.raise_for_status()
             tokens = await r.json(content_type=None)
-        if not isinstance(tokens, list):  # ошибка API приходит объектом {"error": ...}
+        if not isinstance(tokens, list):  # API errors come back as an object {"error": ...}
             raise ValueError(f"unexpected Jupiter reply: {str(tokens)[:120]}")
         matches = [
             t for t in tokens
@@ -199,13 +199,13 @@ class TokenResolver:
     # ------------------------------------------------ ticker + market cap
 
     async def match_by_mcap(self, term: str, mcap_usd: float, tol: float = 0.25) -> tuple[str | None, str]:
-        """Опознать токен без адреса: среди всех Solana-токенов с символом (или именем)
-        `term` оставить тот, чья текущая капитализация в ±tol от экранной.
+        """Identify a token without an address: among all Solana tokens with symbol (or name)
+        `term` keep the one whose current market cap is within ±tol of the on-screen one.
 
-        Только однозначный ответ: 0 совпадений → None, ≥2 → None ("ambiguous").
-        Сравниваются ВСЕ одноимённые токены (не только pump), иначе pump-копикат с
-        похожей капитализацией мог бы «выиграть» у настоящего не-pump токена.
-        Возвращает (mint, причина) — mint может оказаться не pump (executor откажет).
+        Unambiguous answers only: 0 matches → None, ≥2 → None ("ambiguous").
+        ALL same-name tokens are compared (not just pump), otherwise a pump copycat with
+        a similar market cap could "win" over the real non-pump token.
+        Returns (mint, reason); the mint may be non-pump (the executor will reject it).
         """
         term = _sym(term)
         if not term or mcap_usd <= 0:

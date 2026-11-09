@@ -1,21 +1,21 @@
-"""Восстановление mint-адресов, испорченных OCR.
+"""Repair of OCR-corrupted mint addresses.
 
-OCR регулярно путает похожие глифы: `1→I`, `2→Z`, `5→S`, `o→0`… Испорченный
-адрес не проходит base58/32-байтовую проверку, и самый сильный сигнал (mint на
-экране) теряется. Пример с реального прогона EasyOCR:
+OCR routinely confuses similar glyphs: `1→I`, `2→Z`, `5→S`, `o→0`… A corrupted
+address fails the base58/32-byte check, and the strongest signal (a mint on
+screen) is lost. Example from a real EasyOCR run:
 
-    9iPGa52e8Fhxs496SK1HEvtqPMb64J71TkKnz2Vnpump   (на экране)
+    9iPGa52e8Fhxs496SK1HEvtqPMb64J71TkKnz2Vnpump   (on screen)
     9iPGa52e8Fhxs496SKIHEvtqPMb64J71TkKnzZVnpump   (OCR)
 
-Подход:
-1. «почти-адрес»: токен 40–46 символов, оканчивается на `pump` (pump.fun vanity),
-   невалиден как есть;
-2. кандидаты: обязательные замены символов вне base58 (`I`, `l`, `O`, `0`, `|`)
-   + до MAX_SWAPS замен визуально похожих символов; фильтр «декодируется в 32 байта»
-   (слабый: ~30% случайных 44-символьных строк проходят — поэтому шаг 3);
-3. верификация на mainnet: один `getMultipleAccounts` — существует ли mint,
-   принадлежащий SPL Token / Token-2022. Результат кешируется по сырой строке,
-   поэтому повторяющийся на кадрах адрес проверяется один раз.
+Approach:
+1. near-address: a 40–46 char token ending in `pump` (pump.fun vanity),
+   invalid as-is;
+2. candidates: mandatory substitution of non-base58 chars (`I`, `l`, `O`, `0`, `|`)
+   + up to MAX_SWAPS swaps of look-alike chars; filter "decodes to 32 bytes"
+   (weak: ~30% of random 44-char strings pass — hence step 3);
+3. mainnet verification: one `getMultipleAccounts` — does a mint exist
+   owned by SPL Token / Token-2022. The result is cached by raw string,
+   so an address repeated across frames is checked once.
 """
 
 from __future__ import annotations
@@ -35,11 +35,11 @@ log = logging.getLogger("vision.mint_repair")
 BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _IDX = {c: i for i, c in enumerate(BASE58)}
 
-# Символы вне base58 → чем они обычно были на экране.
+# Non-base58 chars → what they usually were on screen.
 FORCED = {
     "I": "1i", "l": "1i", "|": "1", "O": "oDQ", "0": "oDQ",
 }
-# Base58-символы, которые OCR путает между собой (симметрично).
+# Base58 chars that OCR confuses with each other (symmetric).
 _PAIRS = [("Z", "2"), ("z", "2"), ("S", "5"), ("s", "5"), ("B", "8"), ("G", "6"),
           ("g", "9"), ("q", "9"), ("b", "6"), ("T", "7"), ("A", "4"), ("u", "v"),
           ("U", "V"), ("n", "m")]
@@ -66,7 +66,7 @@ def decodes_to_32(s: str) -> bool:
 
 
 def is_near_mint(token: str) -> bool:
-    """Похоже на pump.fun mint, испорченный OCR (а не на произвольное слово)."""
+    """Looks like an OCR-corrupted pump.fun mint (not an arbitrary word)."""
     t = token.strip(".,:;()[]{}<>\"'`")
     if not 40 <= len(t) <= 46 or not t.lower().endswith("pump"):
         return False
@@ -75,9 +75,9 @@ def is_near_mint(token: str) -> bool:
 
 
 def candidate_levels(token: str, max_swaps: int = MAX_SWAPS, limit: int = MAX_CANDIDATES) -> list[list[str]]:
-    """Кандидаты-исправления по уровням: [k=0 замен похожих символов, k=1, k=2 …]."""
+    """Repair candidates by level: [k=0 look-alike swaps, k=1, k=2 …]."""
     t = token.strip(".,:;()[]{}<>\"'`")
-    body, suffix = t[:-4], "pump"  # суффикс vanity-адреса фиксирован
+    body, suffix = t[:-4], "pump"  # vanity-address suffix is fixed
     forced = [i for i, c in enumerate(body) if c not in _IDX]
     if any(body[i] not in FORCED for i in forced):
         return []
@@ -111,31 +111,31 @@ def candidates(token: str, max_swaps: int = MAX_SWAPS, limit: int = MAX_CANDIDAT
 
 def _ssl_context() -> ssl.SSLContext:
     try:
-        import certifi  # python.org-сборки не видят системные корни
+        import certifi  # python.org builds don't see the system root CAs
         return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         return ssl.create_default_context()
 
 
 class MintVerifier:
-    """On-chain проверка кандидатов с кешем. Потокобезопасен (vision крутится в to_thread)."""
+    """Cached on-chain candidate verification. Thread-safe (vision runs in to_thread)."""
 
-    BATCH = 100  # лимит getMultipleAccounts
-    NEG_TTL = 30.0  # «ничего не нашли» — перепроверить позже (токен мог только что создаться)
+    BATCH = 100  # getMultipleAccounts limit
+    NEG_TTL = 30.0  # "nothing found" — recheck later (the token may have just been created)
 
     def __init__(self, rpc_url: str | None = None, timeout: float = 2.0):
         url = rpc_url or os.getenv("RPC_URL") or ""
-        if not url or "YOUR_KEY" in url:  # плейсхолдер из .env.example
+        if not url or "YOUR_KEY" in url:  # placeholder from .env.example
             url = "https://api.mainnet-beta.solana.com"
         self.rpc_url = url
-        self._down_until = 0.0  # после ошибки RPC не дёргаем его на каждом кадре
+        self._down_until = 0.0  # after an RPC error, don't hit it on every frame
         self.timeout = timeout
         self._ctx = _ssl_context()
         self._cache: dict[str, tuple[str | None, float]] = {}
         self._lock = threading.Lock()
 
     def _existing_mints(self, keys: list[str]) -> list[str]:
-        """Параллельные getMultipleAccounts по 100 ключей."""
+        """Parallel getMultipleAccounts, 100 keys each."""
         chunks = [keys[i:i + self.BATCH] for i in range(0, len(keys), self.BATCH)]
         if len(chunks) <= 1:
             return self._batch(chunks[0]) if chunks else []
@@ -151,7 +151,7 @@ class MintVerifier:
         return [k for k, v in zip(chunk, vals) if v and v.get("owner") in TOKEN_PROGRAMS]
 
     def resolve(self, raw: str) -> str | None:
-        """Исправленный mint для сырой OCR-строки или None."""
+        """Repaired mint for a raw OCR string, or None."""
         now = time.monotonic()
         if now < self._down_until:
             return None
@@ -159,9 +159,9 @@ class MintVerifier:
             hit = self._cache.get(raw)
         if hit and (hit[0] is not None or now - hit[1] < self.NEG_TTL):
             return hit[0]
-        # Уровнями: сначала минимум замен; первое однозначное совпадение — ответ.
+        # By level: fewest swaps first; the first unambiguous match wins.
         mint, n, t0 = None, 0, time.perf_counter()
-        # Мелкие уровни склеиваем в один батч: на 1 RPC round-trip меньше.
+        # Small levels are merged into one batch: one fewer RPC round-trip.
         stages: list[list[str]] = []
         for level in candidate_levels(raw):
             if stages and len(stages[-1]) + len(level) <= self.BATCH:
@@ -174,7 +174,7 @@ class MintVerifier:
             n += len(level)
             try:
                 found = self._existing_mints(level)
-            except Exception as e:  # сеть — не причина ронять vision
+            except Exception as e:  # a network error is no reason to crash vision
                 self._down_until = time.monotonic() + 5.0
                 log.warning("mint repair: RPC failed (%s) — pausing 5s", e)
                 return None
@@ -182,7 +182,7 @@ class MintVerifier:
                 mint = found[0]
                 log.info("mint repair: %s → %s (%d candidates, %.0fms)", raw, mint, n, (time.perf_counter() - t0) * 1000)
                 break
-            if len(found) > 1:  # неоднозначно → не угадываем
+            if len(found) > 1:  # ambiguous → don't guess
                 log.warning("mint repair: %s ambiguous (%d on-chain matches) — skipped", raw, len(found))
                 break
         with self._lock:

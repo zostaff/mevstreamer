@@ -1,12 +1,12 @@
-"""Детекция торговых ключевых фраз и тикеров в транскрипте стрима.
+"""Detect trading key phrases and tickers in a stream transcript.
 
-Матчинг идёт по токенам (не по подстрокам), поэтому "im in" не срабатывает
-внутри "im interested", а "sold" — внутри "soldier".
+Matching is token-based (not substring), so "im in" does not fire inside
+"im interested", nor "sold" inside "soldier".
 
-Fuzzy: Whisper путает 1-2 символа ("apeing in", "a ping in"). Допуск зависит
-от длины фразы — у коротких фраз fuzzy даёт в основном ложные срабатывания
-("selling" → "telling", "sold" → "told"), поэтому однословные и короткие
-фразы матчатся только точно.
+Fuzzy: Whisper garbles 1-2 characters ("apeing in", "a ping in"). Tolerance
+depends on phrase length: on short phrases fuzzy mostly yields false positives
+("selling" → "telling", "sold" → "told"), so single-word and short phrases
+match exactly only.
 """
 
 from __future__ import annotations
@@ -19,12 +19,12 @@ CONF_FUZZY_1 = 0.7
 CONF_FUZZY_2 = 0.5
 _CONF_BY_DIST = {0: CONF_EXACT, 1: CONF_FUZZY_1, 2: CONF_FUZZY_2}
 
-# Отрицание в ≤5 токенах перед фразой → не сигнал ("i'm not buying this",
+# Negation within ≤5 tokens before the phrase → no signal ("i'm not buying this",
 # "i would never be aping into that", "don't sell")
 _NEGATIONS = {"not", "dont", "never", "wont", "cant", "isnt", "aint", "didnt", "wouldnt", "shouldnt",
               "no", "nobody", "stop"}
 _NEGATION_WINDOW = 5
-# "not gonna lie, aping in" — не отрицание
+# "not gonna lie, aping in" is not a negation
 _NOT_NEGATION_AFTER = (("gonna", "lie"), ("going", "to", "lie"), ("to", "lie"), ("lie",))
 
 
@@ -33,34 +33,34 @@ def _is_negation(norms: list[str], k: int) -> bool:
         return False
     return not any(tuple(norms[k + 1:k + 1 + len(p)]) == p for p in _NOT_NEGATION_AFTER)
 
-# Негативный контекст в том же высказывании гасит BUY ("everyone is aping into
-# this rug", "stay away, honeypot"). Однословные — по токенам, многословные — по фразе.
+# Negative context in the same utterance suppresses BUY ("everyone is aping into
+# this rug", "stay away, honeypot"). Single words match by token, multi-word by phrase.
 _NEGATIVE_WORDS = {"rug", "rugged", "rugging", "rugpull", "scam", "scammer", "scammed", "honeypot", "avoid"}
 _NEGATIVE_PHRASES = ("stay away", "dont buy", "do not buy", "not buying", "rug pull")
 
-# Однозначные фразы (кроме них — только exact). Fuzzy допускается лишь у
-# длинных специфичных фраз, где опечатка Whisper не превращает её в бытовую речь
-# ("going on" ≈ "going in", "getting it" ≈ "getting in" — поэтому они exact-only).
+# Unambiguous phrases (everything else is exact-only). Fuzzy is allowed only for
+# long, specific phrases where a Whisper typo cannot turn them into everyday speech
+# ("going on" ≈ "going in", "getting it" ≈ "getting in", hence exact-only).
 _FUZZY_OK = {
     "buying this", "aping in", "aping into", "sniping this", "buying right now",
     "just bought", "im buying", "market buy", "taking profit", "taking profits",
     "selling now", "cutting losses",
 }
 
-# Фразы без объекта: слово после них — не тикер ("let's go guys", "yolo bro")
+# Phrases without an object: the next word is not a ticker ("let's go guys", "yolo bro")
 _NO_OBJECT_PHRASES = {
     "interesting", "what do you think", "this looks good", "could be big", "im out",
     "sold it", "selling it", "dumping it",
 }
 
-# Глаголы, после которых обычно идёт тикер ("buying [TICKER]"), даже вне фраз
+# Verbs usually followed by a ticker ("buying [TICKER]"), even outside phrases
 _TICKER_VERBS = {
     "buying": 0.6, "buy": 0.55, "bought": 0.6, "aping": 0.6, "ape": 0.55,
     "sniping": 0.6, "snipe": 0.55, "grabbing": 0.55, "longing": 0.55,
     "selling": 0.55, "sell": 0.5, "dumping": 0.5, "holding": 0.5,
 }
 
-# Пропускаются при поиске тикера после фразы ("buying some more PEPE")
+# Skipped when looking for a ticker after a phrase ("buying some more PEPE")
 _FILLERS = {
     "this", "that", "the", "a", "an", "some", "more", "into", "in", "on", "at",
     "right", "now", "here", "uh", "um", "uhh", "umm", "like", "just", "real",
@@ -73,37 +73,37 @@ _NUMBER_WORDS = {
 }
 _AMOUNT_UNITS = {"sol", "solana", "eth", "k", "bucks", "dollars", "grand", "usd", "usdc"}
 
-# Не тикеры. Включает служебные слова, филлеры стримеров и торговый жаргон.
+# Not tickers: function words, streamer fillers and trading slang.
 STOPWORDS = {
-    # спецификация
+    # spec
     "this", "it", "some", "that", "the",
-    # служебные
+    # function words
     "a", "an", "and", "or", "but", "so", "if", "then", "than", "as", "by", "from",
     "in", "on", "into", "at", "of", "to", "for", "with", "up", "down", "out", "off",
     "over", "back", "about", "here", "there", "now", "right", "again", "too", "also",
     "very", "just", "really", "only", "even", "still", "because", "cause", "cuz",
     "not", "dont", "cant", "wont", "no", "yes", "yeah", "yep", "nah", "ok", "okay",
-    # местоимения / вопросы
+    # pronouns / question words
     "i", "im", "me", "my", "mine", "you", "your", "youre", "we", "us", "our", "they",
     "them", "their", "he", "she", "his", "her", "its", "these", "those", "what",
     "which", "who", "how", "why", "when", "where", "everyone", "everybody",
-    # глаголы
+    # verbs
     "is", "was", "be", "are", "am", "were", "been", "being", "do", "did", "does",
     "have", "has", "had", "get", "getting", "got", "go", "going", "gonna", "wanna",
     "gotta", "lets", "let", "can", "could", "would", "should", "will", "might",
     "think", "thinking", "know", "see", "check", "look", "looks", "looking",
     "watch", "watching", "keep", "make", "take", "taking", "put", "want",
-    # количества
+    # quantities
     "all", "everything", "something", "anything", "nothing", "thing", "stuff",
     "more", "much", "lot", "lots", "bit", "little", "few", "many", "any", "every",
     "another", "other", "next", "same", "one", "half",
-    # прилагательные / междометия
+    # adjectives / interjections
     "big", "good", "bad", "nice", "huge", "great", "new", "real", "quick", "fast",
     "uh", "um", "uhh", "umm", "oh", "like", "well", "yo", "hey", "wow", "damn",
     "holy", "shit", "fuck", "fucking", "lol", "lmao", "haha", "bro", "dude", "man",
     "guys", "chat", "boys", "baby", "maybe", "probably", "actually", "literally",
     "definitely", "honestly", "way", "time", "today", "tonight", "please",
-    # торговый жаргон (не тикеры)
+    # trading slang (not tickers)
     "buy", "buying", "bought", "sell", "selling", "sold", "ape", "aping", "send",
     "sending", "sent", "entry", "market", "profit", "profits", "loss", "losses",
     "pump", "pumping", "dump", "dumping", "moon", "mooning", "dip", "chart",
@@ -112,7 +112,7 @@ STOPWORDS = {
     "worth", "ticker", "called", "named", "size", "full", "yolo", "exit",
 }
 
-# "X looks good", "X is pumping" — тикер стоит перед триггером
+# "X looks good", "X is pumping" — ticker precedes the trigger
 _POSTFIX_TRIGGERS = [
     ("looks", "good"), ("looks", "bullish"), ("looking", "good"), ("is", "pumping"),
     ("is", "sending"), ("is", "mooning"), ("is", "ripping"), ("could", "be", "big"),
@@ -120,22 +120,22 @@ _POSTFIX_TRIGGERS = [
 ]
 
 _TOKEN_RE = re.compile(r"\$\s?[A-Za-z][A-Za-z0-9]*|[A-Za-z0-9']+")
-_TICKER_RE = re.compile(r"^[a-z][a-z0-9]{1,14}$")  # 2-15 символов, с буквы
+_TICKER_RE = re.compile(r"^[a-z][a-z0-9]{1,14}$")  # 2-15 chars, starts with a letter
 
 
 @dataclass(frozen=True)
 class Token:
-    norm: str      # lowercase, без пунктуации и апострофов: "i'm" → "im"
-    raw: str       # как написал Whisper (для проверки регистра)
-    dollar: bool   # был префикс "$"
+    norm: str      # lowercase, no punctuation or apostrophes: "i'm" → "im"
+    raw: str       # as Whisper wrote it (for case checks)
+    dollar: bool   # had a "$" prefix
 
 
 @dataclass(frozen=True)
 class _Match:
     type: str
     phrase: str
-    start: int     # индекс токена (включительно)
-    end: int       # индекс токена (не включительно)
+    start: int     # token index (inclusive)
+    end: int       # token index (exclusive)
     dist: int
     matched: str
 
@@ -158,7 +158,7 @@ def tokenize(text: str) -> list[Token]:
 
 
 def edit_distance(a: str, b: str, limit: int) -> int:
-    """Левенштейн с ранней остановкой: возвращает limit+1, если больше limit."""
+    """Levenshtein with early exit: returns limit+1 if the distance exceeds limit."""
     if abs(len(a) - len(b)) > limit:
         return limit + 1
     if a == b:
@@ -176,9 +176,9 @@ def edit_distance(a: str, b: str, limit: int) -> int:
 
 def _max_edits(phrase: str) -> int:
     if phrase not in _FUZZY_OK:
-        return 0                       # короткие/неоднозначные — только точно
+        return 0                       # short/ambiguous: exact only
     if " " not in phrase:
-        return 0                       # однословные — только точно
+        return 0                       # single-word: exact only
     n = len(phrase.replace(" ", ""))
     if n <= 5:
         return 0                       # "im in", "im out", "sold"
@@ -188,8 +188,8 @@ def _max_edits(phrase: str) -> int:
 
 
 class KeywordSpotter:
-    # Без "let's go" / "i'm in" / "yolo" / "full send": на стримах это обычная
-    # болтовня, а не покупка. Короткие ("going in", "getting in") — exact-only.
+    # No "let's go" / "i'm in" / "yolo" / "full send": on streams that is idle
+    # chatter, not a buy. Short ones ("going in", "getting in") are exact-only.
     BUY_PHRASES = [
         "buying this", "aping in", "aping into", "ape this", "ape into",
         "sending it", "going in", "buying right now", "just bought",
@@ -205,8 +205,8 @@ class KeywordSpotter:
         "what do you think", "should i buy",
     ]
 
-    # Только явные многословные фразы про СВОЮ продажу. "closing", "exit",
-    # "get out", голые "sold"/"selling" — бытовая речь ("sold out", "get out of here").
+    # Only explicit multi-word phrases about the streamer's OWN sell. "closing", "exit",
+    # "get out", bare "sold"/"selling" are everyday speech ("sold out", "get out of here").
     SELL_PHRASES = [
         "sold it", "i sold", "just sold", "selling now", "selling it",
         "selling this", "taking profit", "taking profits", "take profits",
@@ -214,8 +214,8 @@ class KeywordSpotter:
     ]
 
     def __init__(self):
-        # (type, normalized phrase, tokens, max_edits); дубли вроде "i'm in"/"im in"
-        # схлопываются после нормализации
+        # (type, normalized phrase, tokens, max_edits); duplicates like "i'm in"/"im in"
+        # collapse after normalization
         seen: set[tuple[str, str]] = set()
         self._phrases: list[tuple[str, str, int, int]] = []
         for kind, phrases in (
@@ -239,18 +239,18 @@ class KeywordSpotter:
             f" {p} " in joined for p in _NEGATIVE_PHRASES)
         candidates: list[_Match] = []
         for kind, phrase, n, max_ed in self._phrases:
-            # окна n-1..n+1 токенов: Whisper может склеить/разбить слово
+            # windows of n-1..n+1 tokens: Whisper may merge/split words
             sizes = (n,) if max_ed == 0 else tuple(s for s in (n - 1, n, n + 1) if s >= 1)
             for size in sizes:
                 for i in range(len(norms) - size + 1):
                     if i + size <= boundary:
-                        continue       # целиком в контексте — уже обработано
+                        continue       # entirely inside context: already handled
                     window = " ".join(norms[i:i + size])
                     d = edit_distance(window, phrase, max_ed)
                     if d <= max_ed:
                         candidates.append(_Match(kind, phrase, i, i + size, d, window))
 
-        # Лучшие непересекающиеся: точнее → длиннее фраза
+        # Best non-overlapping: more exact first, then longer phrase
         candidates.sort(key=lambda m: (m.dist, -len(m.phrase), m.start))
         taken: list[_Match] = []
         for m in candidates:
@@ -266,15 +266,15 @@ class KeywordSpotter:
         return taken
 
     def spot(self, transcript_text: str, context: str = "") -> list[dict]:
-        """Текст → [{type, phrase, confidence, matched}].
+        """Text → [{type, phrase, confidence, matched}].
 
-        context — хвост предыдущего чанка: ловит фразы, разрезанные границей
-        чанка ("aping" | "into pepe"). Фразы, целиком лежащие в context,
-        не возвращаются (они уже были в прошлом чанке).
+        context is the tail of the previous chunk: catches phrases split by a chunk
+        boundary ("aping" | "into pepe"). Phrases lying entirely within context
+        are not returned (they were reported with the previous chunk).
         """
         ctx = tokenize(context) if context else []
         tokens = ctx + tokenize(transcript_text)
-        # Повтор фразы ("let's go! let's go!") — один сигнал с лучшим confidence
+        # Repeated phrase ("let's go! let's go!") → one signal with the best confidence
         best: dict[tuple[str, str], dict] = {}
         for m in self._find_matches(tokens, boundary=len(ctx)):
             conf = _CONF_BY_DIST[m.dist]
@@ -295,12 +295,12 @@ class KeywordSpotter:
 
     @staticmethod
     def _caps_boost(tok: Token) -> float:
-        # Whisper пишет тикеры капсом ("WIF", "PEPE") — сильный признак
+        # Whisper writes tickers in caps ("WIF", "PEPE"): a strong cue
         return 0.15 if len(tok.raw) >= 2 and tok.raw.isupper() else 0.0
 
     def _ticker_after(self, tokens: list[Token], pos: int) -> int | None:
-        """Первый правдоподобный тикер в ≤5 токенах после фразы.
-        Пропускает филлеры и суммы: "buying like 2 sol of PEPE" → PEPE."""
+        """First plausible ticker within ≤5 tokens after the phrase.
+        Skips fillers and amounts: "buying like 2 sol of PEPE" → PEPE."""
         amount_seen = False
         for j in range(pos, min(pos + 5, len(tokens))):
             t = tokens[j].norm
@@ -316,7 +316,7 @@ class KeywordSpotter:
         return None
 
     def extract_tickers(self, transcript_text: str, context: str = "") -> list[dict]:
-        """Текст → [{ticker, confidence, source}], по убыванию confidence."""
+        """Text → [{ticker, confidence, source}], sorted by confidence descending."""
         ctx = tokenize(context) if context else []
         tokens = ctx + tokenize(transcript_text)
         boundary = len(ctx)
@@ -337,7 +337,7 @@ class KeywordSpotter:
             else:
                 if source not in cur["sources"]:
                     cur["sources"].append(source)
-                    conf = max(conf, cur["confidence"]) + 0.05  # подтверждено 2 паттернами
+                    conf = max(conf, cur["confidence"]) + 0.05  # confirmed by 2 patterns
                 cur["confidence"] = round(min(0.95, max(conf, cur["confidence"])), 2)
 
         for i, tok in enumerate(tokens):

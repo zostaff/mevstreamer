@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Точка входа Python-стека: стрим → vision/audio → scoring → executor.
+"""Python stack entry point: stream → vision/audio → scoring → executor.
 
-    python signal/orchestrator.py                     # режим из .env (DRY_RUN=true по умолчанию)
-    python signal/orchestrator.py --monitor-only      # только показывать сигналы
+    python signal/orchestrator.py                     # mode from .env (DRY_RUN=true by default)
+    python signal/orchestrator.py --monitor-only      # show signals only
     python signal/orchestrator.py --dry-run --stream twitch.tv/name --threshold 0.75
 
-Live-режим (реальная отправка в executor) включается только DRY_RUN=false в
-окружении/.env и без --dry-run / --monitor-only.
+Live mode (real dispatch to the executor) is enabled only by DRY_RUN=false in
+the environment/.env and without --dry-run / --monitor-only.
 
-В executor уходят только action=buy|sell с confidence >= threshold;
-watch-сигналы лишь логируются.
+Only action=buy|sell with confidence >= threshold is sent to the executor;
+watch signals are only logged.
 """
 
 from __future__ import annotations
@@ -30,14 +30,14 @@ from urllib.parse import parse_qs, urlparse
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-# multiprocessing (spawn-воркеры, resource_tracker) стартует детей через
-# `python -c ...`, а при -c в sys.path[0] попадает cwd. Запуск из корня →
-# папка signal/ затеняет stdlib `signal` в дочерних процессах.
-# PYTHONSAFEPATH=1 (3.11+) убирает cwd из sys.path; env наследуется детьми.
+# multiprocessing (spawn workers, resource_tracker) starts children via
+# `python -c ...`, and with -c, cwd lands in sys.path[0]. Running from the root →
+# the signal/ folder shadows stdlib `signal` in child processes.
+# PYTHONSAFEPATH=1 (3.11+) drops cwd from sys.path; children inherit the env.
 os.environ["PYTHONSAFEPATH"] = "1"
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
-# Корень — в КОНЕЦ sys.path: папка signal/ в корне иначе затенит stdlib `signal`
+# Root goes at the END of sys.path, otherwise the root's signal/ folder shadows stdlib `signal`
 if str(_ROOT) not in sys.path:
     sys.path.append(str(_ROOT))
 
@@ -52,7 +52,7 @@ from ingestion.config import CaptureConfig  # noqa: E402
 log = logging.getLogger("signal")
 
 # --------------------------------------------------------------------------
-# Цвета
+# Colors
 # --------------------------------------------------------------------------
 
 _COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
@@ -95,7 +95,7 @@ def setup_logging(level: str) -> None:
     h.setFormatter(_ColorFormatter())
     logging.basicConfig(level=level.upper(), handlers=[h], force=True)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
-    # faster-whisper пишет 2 INFO-строки на каждый чанк, httpx — загрузку моделей
+    # faster-whisper logs 2 INFO lines per chunk, httpx logs model downloads
     for noisy in ("faster_whisper", "httpx"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
@@ -116,7 +116,7 @@ def _env_float(name: str, default: float) -> float:
     try:
         return float(raw) if raw else default
     except ValueError as e:
-        raise ValueError(f"{name} должен быть числом, получено {raw!r}") from e
+        raise ValueError(f"{name} must be a number, got {raw!r}") from e
 
 
 def _helius_key_from_env() -> str | None:
@@ -142,8 +142,8 @@ class OrchestratorConfig:
     display_min_confidence: float = 0.3
     vision_window_sec: float = 3.0
     audio_window_sec: float = 10.0
-    # ticker-only сигнал (mint'а на экране нет) → резолв по тикеру легко попадает
-    # в копикат/старый токен. По умолчанию такие BUY/SELL только логируются.
+    # ticker-only signal (no mint on screen) → ticker resolution easily lands
+    # on a copycat/stale token. By default such BUY/SELL signals are only logged.
     allow_ticker_only: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -152,8 +152,8 @@ class OrchestratorConfig:
         return self.capture.stream_url
 
     def __getattr__(self, name: str):
-        # VisionPipeline/AudioPipeline получают этот config: даём доступ к
-        # полям CaptureConfig (fps, width, height, ...) напрямую.
+        # VisionPipeline/AudioPipeline receive this config: expose
+        # CaptureConfig fields (fps, width, height, ...) directly.
         capture = self.__dict__.get("capture")
         if capture is not None and hasattr(capture, name):
             return getattr(capture, name)
@@ -161,12 +161,12 @@ class OrchestratorConfig:
 
     @classmethod
     def from_env(cls, args: argparse.Namespace) -> "OrchestratorConfig":
-        capture = CaptureConfig.from_env()  # заодно грузит .env из корня
+        capture = CaptureConfig.from_env()  # also loads .env from the root
         if args.stream:
             capture = replace(capture, stream_urls=[args.stream])
         threshold = args.threshold if args.threshold is not None else _env_float("SIGNAL_THRESHOLD", 0.7)
         if not 0.0 < threshold <= 1.0:
-            raise ValueError(f"threshold должен быть в (0, 1], получено {threshold}")
+            raise ValueError(f"threshold must be in (0, 1], got {threshold}")
         return cls(
             capture=capture,
             signal_threshold=threshold,
@@ -180,7 +180,7 @@ class OrchestratorConfig:
 
 
 # --------------------------------------------------------------------------
-# Статистика
+# Statistics
 # --------------------------------------------------------------------------
 
 @dataclass
@@ -255,33 +255,33 @@ class SessionStats:
 # --------------------------------------------------------------------------
 
 def _load_pipelines():
-    """Ленивый импорт тяжёлых пайплайнов (torch/easyocr/whisper).
+    """Lazy import of the heavy pipelines (torch/easyocr/whisper).
 
-    Под spawn (macOS) каждый capture-воркер заново исполняет этот модуль как
-    __mp_main__ — импорт на уровне модуля загрузил бы модели в каждый воркер.
+    Under spawn (macOS) every capture worker re-executes this module as
+    __mp_main__ — a module-level import would load the models into every worker.
     """
     from ingestion.capture import StreamCapture
     try:
         from vision.pipeline import VisionPipeline
         from audio.pipeline import AudioPipeline
     except ImportError as e:
-        # vision/audio делают `try: from .x … except ImportError: from x …`,
-        # поэтому реальная причина (нет numpy/easyocr/…) лежит в __context__
+        # vision/audio do `try: from .x … except ImportError: from x …`,
+        # so the real cause (missing numpy/easyocr/…) is in __context__
         root = e
         while root.__context__ is not None and isinstance(root.__context__, ImportError):
             root = root.__context__
-        raise SystemExit(f"не удалось импортировать vision/audio pipeline: {root} "
+        raise SystemExit(f"failed to import vision/audio pipeline: {root} "
                          f"(pip install -r vision/requirements.txt -r audio/requirements.txt)") from e
     return StreamCapture, VisionPipeline, AudioPipeline
 
 
 class Orchestrator:
-    PRINT_REPEAT_SEC = 10.0      # повторить вывод неизменного сигнала не чаще
-    PRINT_CONF_DELTA = 0.05      # ...или при изменении confidence на столько
+    PRINT_REPEAT_SEC = 10.0      # reprint an unchanged signal at most this often
+    PRINT_CONF_DELTA = 0.05      # ...or when confidence changes by this much
     STATUS_INTERVAL_SEC = 30.0
     CAPTURE_CHECK_SEC = 2.0
-    CAPTURE_MAX_RESTARTS = 5         # подряд, без периода стабильной работы
-    CAPTURE_STABLE_SEC = 300.0       # столько проработал → счётчик рестартов сброшен
+    CAPTURE_MAX_RESTARTS = 5         # consecutive, without a stable period
+    CAPTURE_STABLE_SEC = 300.0       # uptime that resets the restart counter
 
     def __init__(self, config: OrchestratorConfig, pipelines=None):
         StreamCapture, VisionPipeline, AudioPipeline = pipelines or _load_pipelines()
@@ -289,9 +289,9 @@ class Orchestrator:
         qsize = config.capture.queue_maxsize
         self.video_queue = mp.Queue(maxsize=qsize)
         self.audio_queue = mp.Queue(maxsize=qsize)
-        # StreamCapture пиклится в воркеры → отдаём ему «чистый» CaptureConfig
+        # StreamCapture is pickled into workers → give it a plain CaptureConfig
         self.capture = StreamCapture(config.stream_url, self.video_queue, self.audio_queue, config.capture)
-        # Пайплайны читают свои настройки (OCR_ENGINE, WHISPER_MODEL, ...) из env сами:
+        # Pipelines read their own settings (OCR_ENGINE, WHISPER_MODEL, ...) from env:
         # VisionPipeline(None) → VisionConfig.from_env(), AudioPipeline(None) → AudioConfig.from_env()
         self.vision = VisionPipeline(None)
         self.audio_pipeline = AudioPipeline(None)
@@ -312,7 +312,7 @@ class Orchestrator:
         self._last_error_log = 0.0
         self._last_lag_warn = 0.0
         self._last_ticker_only_log: dict[str, float] = {}
-        # Опознание без адреса: term ($TICKER или заголовок) → (mint|None, mcap при опознании, ts)
+        # Address-less identification: term ($TICKER or title) → (mint|None, mcap at identification, ts)
         self._mcap_ids: dict[str, tuple[str | None, float, float]] = {}
         self._mcap_inflight: set[str] = set()
         self.exit_code = 0
@@ -329,7 +329,7 @@ class Orchestrator:
         log.info("mode=%s threshold=%.2f cooldown=%ss stream=%s", mode, self.threshold,
                  int(self.dedup.cooldown_sec), self.config.stream_url)
         if not self.dry_run and not self.monitor_only:
-            log.warning(red("LIVE MODE: сигналы >= %.2f уходят в executor (%s)"),
+            log.warning(red("LIVE MODE: signals >= %.2f are sent to the executor (%s)"),
                         self.threshold, self.config.ipc_socket_path)
 
         self.capture.start()
@@ -351,7 +351,7 @@ class Orchestrator:
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            if self._dispatch_tasks:  # дать уже отправляемым сигналам завершиться
+            if self._dispatch_tasks:  # let in-flight dispatches finish
                 await asyncio.wait(self._dispatch_tasks, timeout=5)
             log.info("stopping capture...")
             await asyncio.to_thread(self.capture.stop)
@@ -370,15 +370,15 @@ class Orchestrator:
         if self._stop.is_set():
             print(red("\nforce exit"), flush=True)
             os._exit(130)
-        print(dim("\n^C — shutting down (ещё раз для принудительного выхода)"), flush=True)
+        print(dim("\n^C — shutting down (press again to force quit)"), flush=True)
         self._stop.set()
 
     # ---------------------------------------------------------------- loops
 
     @staticmethod
     def _get_latest(q, timeout: float = 0.1) -> tuple[tuple | None, int]:
-        """(самый свежий фрейм, сколько устаревших выброшено). Выполняется в
-        to_thread: unpickle 2.7 МБ фрейма не должен блокировать event loop."""
+        """(latest frame, number of stale frames dropped). Runs in
+        to_thread: unpickling a 2.7 MB frame must not block the event loop."""
         try:
             item = q.get(timeout=timeout)
         except queue.Empty:
@@ -399,8 +399,8 @@ class Orchestrator:
             return None
 
     def _post_error(self, kind: str) -> None:
-        """Ошибка пост-обработки (normalize/aggregate/score): логируем с traceback
-        и продолжаем — иначе упавший цикл через FIRST_COMPLETED гасит всю сессию."""
+        """Post-processing error (normalize/aggregate/score): log with traceback
+        and continue; otherwise a crashed loop takes down the whole session via FIRST_COMPLETED."""
         self.stats.pipeline_errors += 1
         log.exception("%s post-processing error — item skipped", kind)
 
@@ -409,7 +409,7 @@ class Orchestrator:
         now = time.monotonic()
         if now - self._last_error_log > 10:
             self._last_error_log = now
-            log.exception("%s pipeline error (дальше ошибки логируются не чаще раза в 10с)", kind)
+            log.exception("%s pipeline error (further errors logged at most once per 10s)", kind)
 
     async def _video_loop(self) -> None:
         while True:
@@ -432,7 +432,7 @@ class Orchestrator:
                 obs = normalize_vision(raw, ts)
                 metrics = getattr(raw, "metrics", None) or {}
                 if (obs is None or not obs.mints) and metrics.get("market_cap_usd"):
-                    # страница токена без адреса и без $TICKER («JIMOTHY» + MC) — тоже опознаём
+                    # token page with neither address nor $TICKER ("JIMOTHY" + MC): identify it too
                     obs = self._identify_by_mcap(obs or VisionObservation(timestamp=ts), metrics)
                     obs = None if obs.empty else obs
                 if obs is not None:
@@ -450,15 +450,15 @@ class Orchestrator:
                 continue
             ts, pcm = item
             self.stats.audio_chunks += 1
-            # Whisper отстаёт: чанк старше audio-окна агрегатор всё равно сразу
-            # выбросит — не тратим на него Whisper, догоняем live edge
+            # Whisper is lagging: the aggregator would drop a chunk older than the audio window
+            # immediately, so skip Whisper on it and catch up to the live edge
             backlog = time.time() - ts
             if backlog > self.config.audio_window_sec:
                 self.stats.audio_stale_skipped += 1
                 self._warn_lag(backlog, skipped=True)
                 reset = getattr(self.audio_pipeline, "reset", None)
                 if callable(reset):
-                    reset()  # контекст прошлого чанка уже не соседний
+                    reset()  # previous chunk's context is no longer adjacent
                 continue
             t0 = time.perf_counter()
             try:
@@ -486,18 +486,18 @@ class Orchestrator:
         if now - self._last_lag_warn < 10.0:
             return
         self._last_lag_warn = now
-        log.warning("audio отстаёт на %.1fs — Whisper не успевает (модель/устройство?)%s", backlog,
-                    f"; устаревшие чанки пропускаются (всего {self.stats.audio_stale_skipped})" if skipped else "")
+        log.warning("audio lagging by %.1fs — Whisper can't keep up (model/device?)%s", backlog,
+                    f"; skipping stale chunks ({self.stats.audio_stale_skipped} total)" if skipped else "")
 
     def _capture_dead(self) -> bool:
         procs = getattr(self.capture, "_processes", None)
-        if procs:  # один из двух воркеров умер — тоже авария
+        if procs:  # one of the two workers died: also a failure
             return any(not p.is_alive() for p in procs)
         return not self.capture.is_alive()
 
     async def _capture_watchdog(self) -> None:
-        """Воркеры захвата умерли (OOM/segfault/…) → перезапуск с backoff;
-        не поднимаются CAPTURE_MAX_RESTARTS раз подряд → выход с кодом 3."""
+        """Capture workers died (OOM/segfault/…) → restart with backoff;
+        if they fail CAPTURE_MAX_RESTARTS times in a row → exit with code 3."""
         failures = 0
         backoff = 2.0
         last_restart = time.monotonic()
@@ -542,16 +542,16 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- identify
 
-    MCAP_MATCH_FACTOR = 0.8   # вес опознанного mint'а: 0.8 × 0.50 = 0.40 (адрес на экране — 0.50)
-    MCAP_TOL = 0.25           # экранная капитализация vs текущая (задержка стрима, волатильность)
+    MCAP_MATCH_FACTOR = 0.8   # weight of an identified mint: 0.8 × 0.50 = 0.40 (on-screen address: 0.50)
+    MCAP_TOL = 0.25           # on-screen market cap vs current (stream delay, volatility)
     MCAP_ID_TTL = 60.0
     MCAP_NEG_TTL = 20.0
 
     def _identify_by_mcap(self, obs, metrics: dict):
-        """Адреса нет, но есть тикер (или заголовок страницы) и market cap → опознать
-        токен по паре «имя + капитализация» (фоном) и подставить mint в наблюдение.
-        Мульти-токенные экраны (несколько тикеров) пропускаются — нельзя понять,
-        к какому тикеру относится капитализация."""
+        """No address, but a ticker (or page title) and market cap → identify
+        the token by "name + market cap" (in the background) and inject the mint into the observation.
+        Multi-token screens (several tickers) are skipped: there is no way to tell
+        which ticker the market cap belongs to."""
         mcap = metrics.get("market_cap_usd")
         if not mcap:
             return obs
@@ -615,7 +615,7 @@ class Orchestrator:
             now = time.monotonic()
             if now - self._last_ticker_only_log.get(key, -1e9) > 30:
                 self._last_ticker_only_log[key] = now
-                log.warning("ticker-only %s $%s conf=%.2f — mint на экране нет, не отправляется "
+                log.warning("ticker-only %s $%s conf=%.2f — no mint on screen, not sent "
                             "(ALLOW_TICKER_ONLY=false)", sig.action.upper(), sig.ticker, sig.confidence)
             return
 
@@ -638,11 +638,11 @@ class Orchestrator:
                 self.stats.lat("resolve", ms)
                 if not mint:
                     self.stats.unresolved += 1
-                    log.warning("$%s → mint не найден (%.0fms) — сигнал пропущен", sig.ticker, ms)
+                    log.warning("$%s → mint not found (%.0fms) — signal skipped", sig.ticker, ms)
                     return
                 log.info("resolved $%s → %s via %s (%.0fms)", sig.ticker, short_mint(mint), source, ms)
                 sig = replace(sig, mint=mint, context=f"{sig.context} + resolved ${sig.ticker}")
-                if self.dedup.is_duplicate(sig):  # этот mint уже отправляли
+                if self.dedup.is_duplicate(sig):  # this mint was already sent
                     self.stats.deduped += 1
                     return
 
@@ -728,8 +728,8 @@ class Orchestrator:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="mev-streamer: signal orchestrator")
-    p.add_argument("--monitor-only", action="store_true", help="только показывать сигналы, ничего не отправлять")
-    p.add_argument("--dry-run", action="store_true", help="override DRY_RUN=true: логировать WOULD EXECUTE")
+    p.add_argument("--monitor-only", action="store_true", help="show signals only, send nothing")
+    p.add_argument("--dry-run", action="store_true", help="override DRY_RUN=true: log WOULD EXECUTE")
     p.add_argument("--stream", metavar="URL", help="override STREAM_URL")
     p.add_argument("--threshold", type=float, metavar="0.7", help="override SIGNAL_THRESHOLD")
     p.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
@@ -745,7 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("config: %s", e)
         return 2
     if not config.stream_url:
-        log.error("STREAM_URL не задан (.env или --stream URL)")
+        log.error("STREAM_URL not set (.env or --stream URL)")
         return 2
     orch = Orchestrator(config)
     try:

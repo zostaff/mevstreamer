@@ -1,10 +1,10 @@
 easyocr>=1.7
-# headless-сборка: easyocr сам тянет opencv-python-headless, а одновременная
-# установка opencv-python + headless ломает модуль cv2 при удалении одного из них
+# headless build: easyocr pulls in opencv-python-headless itself, and installing
+# opencv-python + headless together breaks the cv2 module when either is removed
 opencv-python-headless>=4.8
 Pillow>=10.0
 numpy>=1.26
 python-dotenv>=1.0
 
-# Опционально, для OCR_ENGINE=tesseract (+ системный бинарь: brew install tesseract)
+# Optional, for OCR_ENGINE=tesseract (+ system binary: brew install tesseract)
 # pytesseract>=0.3.10

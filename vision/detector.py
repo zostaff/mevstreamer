@@ -1,4 +1,4 @@
-"""Детекция Solana адресов (mint / wallet) и тикеров в OCR-блоках."""
+"""Detects Solana addresses (mint / wallet) and tickers in OCR blocks."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 try:
     from .mint_repair import is_near_mint
     from .ocr import bbox_height, group_lines
-except ImportError:  # запуск как скрипт из vision/
+except ImportError:  # run as a script from vision/
     from mint_repair import is_near_mint
     from ocr import bbox_height, group_lines
 
@@ -15,13 +15,13 @@ BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 _B58_INDEX = {c: i for i, c in enumerate(BASE58_ALPHABET)}
 _B58 = "1-9A-HJ-NP-Za-km-z"
 
-# Границы — не-base58 символы, чтобы не выдёргивать 44 символа из tx-сигнатуры (88)
+# Boundaries are non-base58 chars, so 44 chars aren't pulled out of a tx signature (88)
 ADDRESS_RE = re.compile(rf"(?<![{_B58}])[{_B58}]{{32,44}}(?![{_B58}])")
 _HEAD_RUN_RE = re.compile(rf"^[{_B58}]+")
 _TAIL_RUN_RE = re.compile(rf"[{_B58}]+$")
 _B58_WORD_RE = re.compile(rf"^[{_B58}]+$")
 
-# Контекст, при котором не-pump адрес — скорее всего mint, а не кошелёк
+# Context in which a non-pump address is most likely a mint, not a wallet
 _MINT_CONTEXT_RE = re.compile(r"(?i)\b(ca|contract|mint|token\s*address)\b")
 
 DOLLAR_TICKER_RE = re.compile(r"(?<![A-Za-z0-9])\$([A-Z][A-Z0-9]{1,9})(?![A-Za-z0-9])")
@@ -29,7 +29,7 @@ LABEL_TICKER_RE = re.compile(r"(?i)\b(?:ticker|symbol)\s*[:\-]?\s*\$?([A-Za-z][A
 PRICE_SOL_RE = re.compile(r"(?i)\d[\d.,]*\s*[kmb]?\s*sol\b")
 _BARE_TICKER_RE = re.compile(r"^\$?([A-Z][A-Z0-9]{1,9})$")
 
-# Базовые валюты и UI-лейблы, которые выглядят как тикеры
+# Base currencies and UI labels that look like tickers
 TICKER_STOPWORDS = frozenset({
     "SOL", "WSOL", "USD", "USDC", "USDT", "MC", "MCAP", "FDV", "LIQ", "VOL", "ATH",
     "TVL", "BUY", "SELL", "PNL", "TXNS", "HOLDERS", "PRICE", "AUTO", "MAX", "MIN",
@@ -46,10 +46,10 @@ def b58decode(s: str) -> bytes:
 
 
 def is_valid_address(s: str) -> bool:
-    """32–44 символа base58 И декодируется ровно в 32 байта (ed25519 pubkey).
+    """32–44 base58 chars AND decodes to exactly 32 bytes (ed25519 pubkey).
 
-    Проверка длины после декодирования отсекает большую часть OCR-мусора,
-    который случайно состоит из base58 символов.
+    The post-decode length check rejects most OCR garbage
+    that happens to consist of base58 chars.
     """
     if not 32 <= len(s) <= 44 or any(c not in _B58_INDEX for c in s):
         return False
@@ -68,17 +68,17 @@ class TokenDetector:
     # -- addresses ---------------------------------------------------------- #
 
     def find_addresses(self, ocr_results: list[dict]) -> list[dict]:
-        """→ [{address, type: "mint"|"wallet", bbox, confidence, source}], mint'ы первыми."""
+        """→ [{address, type: "mint"|"wallet", bbox, confidence, source}], mints first."""
         found: dict[str, dict] = {}
         lines = group_lines(ocr_results)
         line_text = {id(b): " ".join(x["text"] for x in line) for line in lines for b in line}
 
         for b in ocr_results:
             text, ctx = b["text"], line_text.get(id(b), b["text"])
-            # 1. Целый адрес в одном блоке
+            # 1. Whole address in a single block
             for m in self.address_re.finditer(text):
                 self._add(found, m.group(), b["bbox"], b["confidence"], ctx, b.get("roi"))
-            # 1b. OCR вставил пробел(ы) внутрь адреса: "7xKXtg2CW87 d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+            # 1b. OCR inserted space(s) inside the address: "7xKXtg2CW87 d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
             words = text.split()
             for i in range(len(words)):
                 for k in (2, 3):
@@ -89,7 +89,7 @@ class TokenDetector:
                     if is_valid_address(cand):
                         self._add(found, cand, b["bbox"], b["confidence"] * 0.9, ctx, b.get("roi"))
 
-        # 2. Адрес разбит на 2 соседних блока на одной Y-линии
+        # 2. Address split across 2 adjacent blocks on the same Y line
         for line in lines:
             for a, c in zip(line, line[1:]):
                 gap = c["bbox"][0] - a["bbox"][2]
@@ -108,11 +108,11 @@ class TokenDetector:
         return sorted(found.values(), key=lambda r: (r["type"] != "mint", -r["confidence"]))
 
     def find_near_mints(self, ocr_results: list[dict]) -> list[dict]:
-        """OCR-испорченные pump.fun mint'ы (→ mint_repair): [{raw, bbox, confidence, source}]."""
+        """OCR-corrupted pump.fun mints (→ mint_repair): [{raw, bbox, confidence, source}]."""
         out: dict[str, dict] = {}
         for b in ocr_results:
             words = b["text"].split()
-            # и как есть, и с пробелом, вставленным OCR внутрь адреса
+            # both as-is and with a space OCR inserted inside the address
             for w in words + ["".join(words[i:i + 2]) for i in range(len(words) - 1)]:
                 w = w.split(":")[-1]  # "CA:9iPG…pump"
                 if is_near_mint(w) and w not in out:
@@ -122,7 +122,7 @@ class TokenDetector:
     @staticmethod
     def _classify(address: str, context: str) -> tuple[str, float]:
         if address.endswith("pump"):
-            # pump.fun vanity mint: 44 символа; короче — тоже mint, но менее уверенно
+            # pump.fun vanity mint: 44 chars; shorter is still a mint, but less confident
             return "mint", 1.05 if len(address) == 44 else 0.95
         if _MINT_CONTEXT_RE.search(context):
             return "mint", 0.9
@@ -141,7 +141,7 @@ class TokenDetector:
     # -- tickers ------------------------------------------------------------ #
 
     def find_tickers(self, ocr_results: list[dict]) -> list[dict]:
-        """→ [{ticker, confidence, bbox}], по убыванию confidence."""
+        """→ [{ticker, confidence, bbox}], by descending confidence."""
         found: dict[str, dict] = {}
 
         def add(ticker: str, conf: float, bbox) -> None:
@@ -158,7 +158,7 @@ class TokenDetector:
             for m in LABEL_TICKER_RE.finditer(b["text"]):
                 add(m.group(1), b["confidence"] * 0.9, b["bbox"])
 
-        # Слово КАПСОМ рядом с ценой в SOL (та же строка или строка над ней)
+        # ALL-CAPS word next to a SOL price (same line or the line above)
         lines = group_lines(ocr_results)
         for li, line in enumerate(lines):
             if not any(PRICE_SOL_RE.search(b["text"]) for b in line):

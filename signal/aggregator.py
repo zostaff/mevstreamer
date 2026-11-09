@@ -1,26 +1,26 @@
-"""Объединение результатов vision + audio пайплайнов во временном окне.
+"""Merges vision + audio pipeline results over a time window.
 
-Vision работает на 3 fps, audio — чанками по 3 сек, поэтому результаты приходят
-в разное время. Агрегатор держит скользящие окна наблюдений каждого канала и
-по запросу отдаёт слитый снапшот (VisionObservation, AudioObservation),
-который потом оценивает SignalScorer.
+Vision runs at 3 fps, audio in 3 s chunks, so results arrive
+at different times. The aggregator keeps a sliding window of observations per channel
+and on request returns a merged snapshot (VisionObservation, AudioObservation)
+for SignalScorer to evaluate.
 
-Входы — результаты соседних пайплайнов (dict или объект с атрибутами):
+Inputs are results from the sibling pipelines (dict or attribute object):
 
     vision.pipeline.VisionResult:
         mints / addresses   — list[str] | [{address, type: "mint"|"wallet", confidence}]
         tickers             — list[str] | [{ticker, confidence}]
         platform            — "photon" | "bullx" | "gmgn" | "pumpfun" | ... | None
         actions / action    — [{action, confidence}] | str: viewing_token, about_to_buy,
-                              bought, about_to_sell, sold (searching — игнорируется)
+                              bought, about_to_sell, sold (searching is ignored)
 
     audio.pipeline.AudioResult:
-        transcript          — текст Whisper
+        transcript          — Whisper text
         signals             — [{type: buy|watch|sell, phrase, confidence, matched}]
         tickers             — list[str] | [{ticker, confidence}]
-        (также поддерживаются buy_phrase / sell_phrase: str | list | bool, mints)
+        (buy_phrase / sell_phrase: str | list | bool, mints are also accepted)
 
-Элементы с confidence ниже MIN_*_CONF отбрасываются.
+Items with confidence below MIN_*_CONF are dropped.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable
 
 # --------------------------------------------------------------------------
-# Валидация / нормализация
+# Validation / normalization
 # --------------------------------------------------------------------------
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -41,7 +41,7 @@ _B58_INDEX = {c: i for i, c in enumerate(_B58_ALPHABET)}
 _MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _TICKER_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 
-# Тикеры, которые постоянно видны в UI терминалов и ничего не значат
+# Tickers always visible in terminal UIs that carry no signal
 TICKER_STOPLIST = frozenset({"SOL", "WSOL", "USDC", "USDT", "USD", "BUY", "SELL", "MC", "LP", "ATH"})
 
 ACTION_ALIASES = {
@@ -53,7 +53,7 @@ ACTION_ALIASES = {
 }
 BUY_ACTION_RANK = {"viewing_token": 1, "about_to_buy": 2, "bought": 3}
 SELL_ACTIONS = frozenset({"about_to_sell", "sold"})
-# Приоритет при нескольких действиях на одном фрейме: факт > намерение > просмотр
+# Priority for multiple actions on one frame: done > intent > viewing
 _ACTION_PRIORITY = {"bought": 5, "sold": 5, "about_to_buy": 4, "about_to_sell": 4, "viewing_token": 1}
 
 log = logging.getLogger("signal.aggregator")
@@ -66,9 +66,9 @@ MIN_PHRASE_CONF = 0.5
 
 
 def is_valid_mint(s: str) -> bool:
-    """Base58 строка, декодирующаяся ровно в 32 байта (pubkey Solana).
+    """Base58 string that decodes to exactly 32 bytes (Solana pubkey).
 
-    Отсекает большую часть OCR-мусора (обрезанные/склеенные адреса).
+    Rejects most OCR garbage (truncated/merged addresses).
     """
     if not _MINT_RE.match(s):
         return False
@@ -109,7 +109,7 @@ def _as_list(val: Any) -> list:
 
 
 def _items(val: Any, key: str, min_conf: float = 0.0) -> list[str]:
-    """list[str] | str | [{key: ..., confidence: ...}] → list[str] с фильтром по confidence."""
+    """list[str] | str | [{key: ..., confidence: ...}] → list[str] filtered by confidence."""
     out = []
     for item in _as_list(val):
         if isinstance(item, dict):
@@ -121,18 +121,18 @@ def _items(val: Any, key: str, min_conf: float = 0.0) -> list[str]:
 
 
 def _mint_items(val: Any) -> list[tuple[str, float]]:
-    """mints/addresses → [(mint, weight_factor)]: фактор = OCR/address confidence
-    (строки без confidence → 1.0), восстановленные mint_repair — не больше 0.9."""
+    """mints/addresses → [(mint, weight_factor)]: factor = OCR/address confidence
+    (strings without confidence → 1.0); mint_repair results are capped at 0.9."""
     out = []
     for item in _as_list(val):
         if isinstance(item, dict):
             addr = item.get("address") or item.get("mint")
             if addr is None:
                 continue
-            # Валидный 32-байтовый base58-адрес сам себя проверяет (случайная
-            # OCR-ошибка почти всегда ломает декодирование), поэтому OCR-confidence —
-            # слабый сигнал: фактор 0.8…1.0. Apple Vision часто отдаёт ровно 0.5 —
-            # без пола это резало вес mint вдвое и сигнал не доходил до порога.
+            # A valid 32-byte base58 address is self-checking (a random
+            # OCR error almost always breaks decoding), so OCR confidence is
+            # a weak signal: factor 0.8…1.0. Apple Vision often reports exactly 0.5;
+            # without the floor that halved the mint weight and the signal missed the threshold.
             conf = MINT_CONF_FLOOR + (1.0 - MINT_CONF_FLOOR) * float(item.get("confidence", 1.0))
             if item.get("repaired_from"):
                 conf = min(conf, REPAIRED_MINT_MAX_FACTOR)
@@ -145,7 +145,7 @@ def _mint_items(val: Any) -> list[tuple[str, float]]:
 
 
 def _near_same_mint(a: str, b: str) -> bool:
-    """Два mint'а — вероятно один и тот же, испорченный OCR (≤2 позиционных отличия)."""
+    """Two mints are likely the same address corrupted by OCR (≤2 positional differences)."""
     return len(a) == len(b) and sum(x != y for x, y in zip(a, b)) <= 2
 
 
@@ -154,7 +154,7 @@ def _uniq(items: Iterable[str]) -> tuple[str, ...]:
 
 
 def _phrase(val: Any, transcript: str) -> str | None:
-    """buy_phrase может быть строкой, списком фраз или bool."""
+    """buy_phrase may be a string, a list of phrases or a bool."""
     if val is None or val is False:
         return None
     if val is True:
@@ -164,7 +164,7 @@ def _phrase(val: Any, transcript: str) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# Наблюдения
+# Observations
 # --------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -175,10 +175,10 @@ class VisionObservation:
     action: str | None = None  # viewing_token | about_to_buy | bought | sold
     text: str = ""
     timestamp: float = 0.0
-    # mint → weight factor (OCR confidence; repaired ≤ 0.9). Нет записи → 1.0
+    # mint → weight factor (OCR confidence; repaired ≤ 0.9). Missing entry → 1.0
     mint_conf: tuple[tuple[str, float], ...] = ()
-    # Только в merged-снапшоте: mint'ы, увиденные в 1 фрейме (ещё не подтверждены),
-    # и флаг «в окне >1 разных mint'ов» — BUY запрещён
+    # Merged snapshot only: mints seen in a single frame (not yet confirmed),
+    # and the "window has >1 distinct mints" flag, which blocks BUY
     unconfirmed_mints: tuple[str, ...] = ()
     ambiguous_mints: bool = False
 
@@ -214,8 +214,8 @@ def normalize_vision(raw: Any, timestamp: float) -> VisionObservation | None:
     actions = [a for a in actions if a]
     action = max(actions, key=_ACTION_PRIORITY.__getitem__) if actions else None
     platform = _field(raw, "platform")
-    # addresses: [{address, type, confidence, repaired_from?}] — приоритетнее,
-    # т.к. несут confidence (VisionResult.mints — голые строки). Только mint, не кошельки.
+    # addresses: [{address, type, confidence, repaired_from?}] take precedence
+    # since they carry confidence (VisionResult.mints are bare strings). Mints only, not wallets.
     addresses = _field(raw, "addresses")
     if addresses is not None:
         mints = [a for a in _as_list(addresses)
@@ -245,7 +245,7 @@ def normalize_audio(raw: Any, timestamp: float) -> AudioObservation | None:
     transcript = str(_field(raw, "transcript", "text", default=""))
     buy = _field(raw, "buy_phrase", "buy_phrases")
     sell = _field(raw, "sell_phrase", "sell_phrases")
-    # KeywordSpotter: signals=[{type, phrase, confidence}], по убыванию confidence не гарантировано
+    # KeywordSpotter: signals=[{type, phrase, confidence}], not guaranteed to be sorted by confidence
     spotted = sorted((s for s in _as_list(_field(raw, "signals")) if isinstance(s, dict)
                       and float(s.get("confidence", 1.0)) >= MIN_PHRASE_CONF),
                      key=lambda s: -float(s.get("confidence", 1.0)))
@@ -266,23 +266,23 @@ def normalize_audio(raw: Any, timestamp: float) -> AudioObservation | None:
 
 
 # --------------------------------------------------------------------------
-# Агрегатор
+# Aggregator
 # --------------------------------------------------------------------------
 
 class SignalAggregator:
-    """Скользящие окна наблюдений; snapshot() сливает окно в одно наблюдение.
+    """Sliding observation windows; snapshot() merges a window into one observation.
 
-    Порядок токенов — по свежести (последний увиденный первым): если стример
-    переключился на другой токен, сигнал должен относиться к нему, а не к
-    тому, что дольше висел на экране.
+    Tokens are ordered by recency (most recently seen first): if the streamer
+    switched to another token, the signal must refer to it, not to
+    whichever stayed on screen longer.
 
-    Защита от чужих mint'ов (чат-оверлей, OCR-мусор):
-      * mint попадает в снапшот, только если виден в >= MIN_MINT_FRAMES фреймах окна;
-      * если в окне видно >1 разных mint'ов (OCR-варианты одного не в счёт) —
-        ambiguous_mints=True, scorer не выдаёт BUY;
-      * buy/sell-фраза живёт phrase_ttl_sec и привязывается к mint'у, только если
-        mint был на экране в ±phrase_bind_sec от момента, когда фразу произнесли
-        ([ts - audio_chunk_sec, ts], ts — конец аудио-чанка).
+    Protection against foreign mints (chat overlay, OCR garbage):
+      * a mint enters the snapshot only if seen in >= MIN_MINT_FRAMES frames of the window;
+      * if the window shows >1 distinct mints (OCR variants of one don't count),
+        ambiguous_mints=True and the scorer emits no BUY;
+      * a buy/sell phrase lives phrase_ttl_sec and binds to a mint only if
+        the mint was on screen within ±phrase_bind_sec of when the phrase was spoken
+        ([ts - audio_chunk_sec, ts], ts = end of the audio chunk).
     """
 
     MIN_MINT_FRAMES = 2
@@ -298,7 +298,7 @@ class SignalAggregator:
         self.audio_chunk_sec = audio_chunk_sec
         self._vision: deque[VisionObservation] = deque()
         self._audio: deque[AudioObservation] = deque()
-        # (ts, mint) — история показов mint'ов дольше vision-окна: для привязки фраз
+        # (ts, mint) — mint sighting history longer than the vision window, for phrase binding
         self._mint_seen: deque[tuple[float, str]] = deque()
         self._last_ambig_log = 0.0
 
@@ -332,7 +332,7 @@ class SignalAggregator:
                         ", ".join(f"{m[:4]}…{m[-4:]}" for m in (*vis.mints, *vis.unconfirmed_mints)))
         if aud is not None and vis is not None and vis.mints and (aud.buy_phrase or aud.sell_phrase):
             if not self._mint_near(vis.mints[0], aud.timestamp):
-                # Фразу сказали, когда этого mint'а на экране не было → не связываем
+                # Phrase was spoken while this mint was not on screen → don't bind
                 aud = AudioObservation(transcript=aud.transcript, tickers=aud.tickers,
                                        mints=aud.mints, timestamp=aud.timestamp)
                 aud = None if aud.empty else aud
@@ -356,7 +356,7 @@ class SignalAggregator:
         all_mints = _uniq(m for o in newest_first for m in o.mints)
         confirmed = tuple(m for m in all_mints if frames[m] >= self.MIN_MINT_FRAMES)
         unconfirmed = tuple(m for m in all_mints if frames[m] < self.MIN_MINT_FRAMES)
-        # Кластеры: OCR-варианты одного адреса (≤2 отличия) — один mint
+        # Clusters: OCR variants of one address (≤2 differences) count as one mint
         clusters: list[str] = []
         for m in all_mints:
             if not any(_near_same_mint(m, c) for c in clusters):
@@ -384,7 +384,7 @@ class SignalAggregator:
         if not self._audio:
             return None
         newest_first = list(reversed(self._audio))
-        # Фразы живут phrase_ttl_sec (тикеры/транскрипт — всё audio-окно)
+        # Phrases live phrase_ttl_sec (tickers/transcript: the whole audio window)
         fresh = [o for o in newest_first if now - o.timestamp <= self.phrase_ttl_sec]
         buy = next((o for o in fresh if o.buy_phrase), None)
         sell = next((o for o in fresh if o.sell_phrase), None)
@@ -395,7 +395,7 @@ class SignalAggregator:
             sell_phrase=sell.sell_phrase if sell else None,
             tickers=_uniq(t for o in newest_first for t in o.tickers),
             mints=_uniq(m for o in newest_first for m in o.mints),
-            # время фразы (если есть) — по нему привязка к mint'у и wire-timestamp
+            # phrase time (if any): used for mint binding and the wire timestamp
             timestamp=phrase_obs.timestamp if phrase_obs else newest_first[0].timestamp,
         )
 

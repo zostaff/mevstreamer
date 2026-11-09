@@ -1,7 +1,7 @@
-"""OCR движок: EasyOCR (GPU, точнее) или Tesseract (CPU, быстрее).
+"""OCR engine: EasyOCR (GPU, more accurate) or Tesseract (CPU, faster).
 
-OCR выполняется не по всему фрейму, а по ROI (URL bar, header токена, правая
-торговая панель) — это примерно в 3 раза быстрее full-frame.
+OCR runs on ROIs rather than the full frame (URL bar, token header, right
+trading panel) — roughly 3x faster than full-frame.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import numpy as np
 
 try:
     import cv2
-except ImportError:  # cv2 нужен только для ускорения resize
+except ImportError:  # cv2 is only needed to speed up resize
     cv2 = None
 
 log = logging.getLogger(__name__)
@@ -25,19 +25,19 @@ DEFAULT_MIN_CONFIDENCE = 0.4
 
 
 # --------------------------------------------------------------------------- #
-# Утилиты для фреймов и OCR-блоков (используются и детектором, и UI)
+# Frame and OCR-block utilities (used by both the detector and the UI recognizer)
 # --------------------------------------------------------------------------- #
 
 def frame_to_array(frame, width: int = 1280, height: int = 720) -> np.ndarray:
-    """RGB bytes (или уже numpy HxWx3) → numpy uint8 (H, W, 3) без копирования."""
+    """RGB bytes (or an existing numpy HxWx3) → numpy uint8 (H, W, 3) without copying."""
     if isinstance(frame, np.ndarray):
         if frame.ndim != 3 or frame.shape[2] != 3:
-            raise ValueError(f"ожидался массив (H, W, 3), получено {frame.shape}")
+            raise ValueError(f"expected an (H, W, 3) array, got {frame.shape}")
         return frame
     expected = width * height * 3
     if len(frame) != expected:
         raise ValueError(
-            f"размер фрейма {len(frame)} байт не совпадает с {width}x{height}x3={expected}"
+            f"frame size {len(frame)} bytes does not match {width}x{height}x3={expected}"
         )
     return np.frombuffer(frame, dtype=np.uint8).reshape(height, width, 3)
 
@@ -51,7 +51,7 @@ def bbox_cy(b: dict) -> float:
 
 
 def group_lines(blocks: list[dict]) -> list[list[dict]]:
-    """Группирует блоки в строки (по центру Y), внутри строки — слева направо."""
+    """Groups blocks into lines (by Y center), left to right within a line."""
     lines: list[dict] = []
     for b in sorted(blocks, key=bbox_cy):
         cy, h = bbox_cy(b), bbox_height(b)
@@ -67,8 +67,8 @@ def group_lines(blocks: list[dict]) -> list[list[dict]]:
 
 
 def sort_reading_order(blocks: list[dict]) -> list[dict]:
-    """Top-to-bottom, left-to-right с учётом того, что блоки одной строки
-    могут немного «гулять» по Y."""
+    """Top-to-bottom, left-to-right, tolerating blocks on the same line
+    drifting slightly in Y."""
     return [b for line in group_lines(blocks) for b in line]
 
 
@@ -80,11 +80,11 @@ def _iou(a, b) -> float:
         return 0.0
     area_a = (a[2] - a[0]) * (a[3] - a[1])
     area_b = (b[2] - b[0]) * (b[3] - b[1])
-    return inter / min(area_a, area_b)  # «перекрытие меньшего» — ловит обрезанные дубли
+    return inter / min(area_a, area_b)  # overlap relative to the smaller box — catches clipped duplicates
 
 
 def _dedupe(blocks: list[dict]) -> list[dict]:
-    """Убирает дубли из зоны нахлёста соседних ROI."""
+    """Removes duplicates from the overlap zone of adjacent ROIs."""
     kept: list[dict] = []
     for b in sorted(blocks, key=lambda x: -x["confidence"]):
         if any(_iou(b["bbox"], k["bbox"]) > 0.6 for k in kept):
@@ -99,7 +99,7 @@ def _dedupe(blocks: list[dict]) -> list[dict]:
 
 @dataclass(frozen=True)
 class ROI:
-    """Регион в долях фрейма. scale > 1 — апскейл перед OCR (мелкий текст)."""
+    """Region in frame fractions. scale > 1 upscales before OCR (small text)."""
 
     name: str
     x1: float
@@ -107,7 +107,7 @@ class ROI:
     x2: float
     y2: float
     scale: float = 1.0
-    pad: float = 0.012  # нахлёст по Y, чтобы не резать строку на границе ROI
+    pad: float = 0.012  # Y overlap so a line isn't cut at the ROI boundary
 
     def to_pixels(self, width: int, height: int) -> tuple[int, int, int, int]:
         py = self.pad * height
@@ -119,12 +119,12 @@ class ROI:
         )
 
 
-# Регионы почти не пересекаются: header начинается там, где кончается URL bar,
-# а торговая панель — под header'ом. Так один и тот же текст не OCR-ится дважды.
+# Regions barely overlap: the header starts where the URL bar ends,
+# and the trading panel sits below the header, so the same text isn't OCR'd twice.
 DEFAULT_ROIS: tuple[ROI, ...] = (
-    ROI("url_bar", 0.0, 0.00, 1.0, 0.05, scale=2.0),     # мелкий шрифт адресной строки
-    ROI("header", 0.0, 0.05, 1.0, 0.15, scale=1.5),      # тикер / mint / MC
-    ROI("trade_panel", 0.70, 0.15, 1.0, 1.0, scale=1.0),  # Buy/Sell, тосты справа
+    ROI("url_bar", 0.0, 0.00, 1.0, 0.05, scale=2.0),     # small address-bar font
+    ROI("header", 0.0, 0.05, 1.0, 0.15, scale=1.5),      # ticker / mint / MC
+    ROI("trade_panel", 0.70, 0.15, 1.0, 1.0, scale=1.0),  # Buy/Sell, toasts on the right
 )
 FULL_FRAME_ROIS: tuple[ROI, ...] = (ROI("full", 0.0, 0.0, 1.0, 1.0, pad=0.0),)
 
@@ -156,17 +156,17 @@ def applevision_available() -> bool:
 
 
 def resolve_engine(engine: str) -> str:
-    """`auto` → Apple Vision на macOS (если стоит pyobjc), иначе EasyOCR."""
+    """`auto` → Apple Vision on macOS (if pyobjc is installed), else EasyOCR."""
     engine = (engine or "auto").lower()
     if engine not in ENGINES:
-        raise ValueError(f"OCR engine: {'|'.join(ENGINES)}, получено {engine!r}")
+        raise ValueError(f"OCR engine: {'|'.join(ENGINES)}, got {engine!r}")
     if engine == "auto":
         return "applevision" if applevision_available() else "easyocr"
     return engine
 
 
 class OCREngine:
-    # EasyOCR Reader грузит модели ~2-3 сек — держим один на процесс
+    # EasyOCR Reader takes ~2-3 s to load models — keep one per process
     _readers: dict = {}
     _readers_lock = threading.Lock()
 
@@ -184,7 +184,7 @@ class OCREngine:
         self.languages = tuple(languages)
         self.min_confidence = min_confidence
         self.rois = tuple(rois)
-        # Инициализация сразу, а не на первом фрейме — чтобы не терять первые секунды стрима
+        # Initialize eagerly, not on the first frame, to avoid losing the first seconds of the stream
         if engine == "easyocr":
             self._reader = self._get_easyocr_reader(self.languages, gpu)
         elif engine == "applevision":
@@ -204,7 +204,7 @@ class OCREngine:
 
                 t0 = time.perf_counter()
                 reader = easyocr.Reader(list(languages), gpu=gpu, verbose=False)
-                log.info("EasyOCR reader готов за %.1fs (gpu=%s)", time.perf_counter() - t0, gpu)
+                log.info("EasyOCR reader ready in %.1fs (gpu=%s)", time.perf_counter() - t0, gpu)
                 cls._readers[key] = reader
         return reader
 
@@ -215,15 +215,15 @@ class OCREngine:
 
         self._objc, self._quartz, self._vision = objc, Quartz, Vision
         self._colorspace = Quartz.CGColorSpaceCreateDeviceRGB()
-        # «fast» заметно хуже читает длинные base58-строки — берём accurate
+        # "fast" reads long base58 strings noticeably worse — use accurate
         self._vn_level = Vision.VNRequestTextRecognitionLevelAccurate
-        # Первый запрос грузит модель (на холодную — до минуты): прогреваем здесь,
-        # а не на первом кадре стрима.
+        # The first request loads the model (up to a minute cold): warm it up here,
+        # not on the first stream frame.
         t0 = time.perf_counter()
         warm = np.full((64, 256, 3), 255, dtype=np.uint8)
         warm[24:40, 16:240] = 0
         list(self._run_applevision(warm))
-        log.info("Apple Vision OCR готов за %.1fs (accurate, без языковой коррекции)", time.perf_counter() - t0)
+        log.info("Apple Vision OCR ready in %.1fs (accurate, no language correction)", time.perf_counter() - t0)
 
     def _init_tesseract(self) -> None:
         import pytesseract
@@ -232,7 +232,7 @@ class OCREngine:
             version = pytesseract.get_tesseract_version()
         except pytesseract.TesseractNotFoundError as e:
             raise RuntimeError(
-                "tesseract не найден в PATH (brew install tesseract / apt install tesseract-ocr)"
+                "tesseract not found in PATH (brew install tesseract / apt install tesseract-ocr)"
             ) from e
         log.info("Tesseract %s", version)
         self._pytesseract = pytesseract
@@ -240,9 +240,9 @@ class OCREngine:
     # -- public ------------------------------------------------------------- #
 
     def extract_text(self, frame_bytes, width: int = 1280, height: int = 720, rois=None) -> list[dict]:
-        """RGB bytes → [{text, bbox: (x1,y1,x2,y2), confidence, roi}], в порядке чтения.
+        """RGB bytes → [{text, bbox: (x1,y1,x2,y2), confidence, roi}], in reading order.
 
-        bbox — в координатах исходного фрейма. rois=None → self.rois.
+        bbox is in source-frame coordinates. rois=None → self.rois.
         """
         return self.extract_text_from_array(frame_to_array(frame_bytes, width, height), rois)
 
@@ -282,9 +282,9 @@ class OCREngine:
         return self._run_tesseract(img)
 
     def _run_applevision(self, img: np.ndarray) -> list:
-        # PyObjC в to_thread-воркерах: у потока нет NSAutoreleasePool → autoreleased
-        # CGImage/VNRequest/результаты копятся (утечка ~МБ на кадр). Пул на кадр;
-        # результаты материализуем в Python-объекты внутри пула.
+        # PyObjC in to_thread workers: the thread has no NSAutoreleasePool → autoreleased
+        # CGImage/VNRequest/results accumulate (~MB leak per frame). One pool per frame;
+        # results are materialized into Python objects inside the pool.
         with self._objc.autorelease_pool():
             return list(self._applevision_body(img))
 
@@ -297,7 +297,7 @@ class OCREngine:
                              provider, None, False, Q.kCGRenderingIntentDefault)
         req = V.VNRecognizeTextRequest.alloc().init()
         req.setRecognitionLevel_(self._vn_level)
-        # Языковая коррекция «исправляет» base58-адреса и тикеры в слова — выключаем
+        # Language correction "fixes" base58 addresses and tickers into words — disable it
         req.setUsesLanguageCorrection_(False)
         handler = V.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
         ok, err = handler.performRequests_error_([req], None)
@@ -309,7 +309,7 @@ class OCREngine:
             if not cand:
                 continue
             top = cand[0]
-            bb = obs.boundingBox()  # нормированные координаты, начало — снизу слева
+            bb = obs.boundingBox()  # normalized coordinates, origin at bottom-left
             x1 = bb.origin.x * w
             x2 = (bb.origin.x + bb.size.width) * w
             y2 = (1 - bb.origin.y) * h
@@ -317,7 +317,7 @@ class OCREngine:
             yield str(top.string()), (x1, y1, x2, y2), float(top.confidence())
 
     def _run_easyocr(self, img: np.ndarray):
-        # EasyOCR внутри считает grayscale как из BGR — отдаём BGR
+        # EasyOCR internally converts to grayscale assuming BGR — pass BGR
         bgr = np.ascontiguousarray(img[:, :, ::-1])
         for points, text, conf in self._reader.readtext(bgr, detail=1, paragraph=False):
             xs = [p[0] for p in points]
@@ -328,13 +328,13 @@ class OCREngine:
         from PIL import Image
 
         gray = (img[:, :, 0] * 0.299 + img[:, :, 1] * 0.587 + img[:, :, 2] * 0.114).astype(np.uint8)
-        if gray.mean() < 128:  # тёмные торговые UI: Tesseract любит тёмный текст на светлом
+        if gray.mean() < 128:  # dark trading UIs: Tesseract prefers dark text on light
             gray = 255 - gray
         out = self._pytesseract.Output
         data = self._pytesseract.image_to_data(
             Image.fromarray(gray), output_type=out.DICT, config="--psm 11"  # sparse text
         )
-        # Слова → строки (block, par, line), чтобы "ticker: XXX" был одним блоком
+        # Words → lines (block, par, line) so "ticker: XXX" is a single block
         lines: dict[tuple, list[int]] = {}
         for i, word in enumerate(data["text"]):
             if not word.strip() or float(data["conf"][i]) < 0:

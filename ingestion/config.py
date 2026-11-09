@@ -1,7 +1,7 @@
-"""Конфигурация модуля захвата стримов.
+"""Stream capture module configuration.
 
-Источники (по приоритету): переменные окружения → .env в корне проекта (../.env)
-→ .env в текущей директории → значения по умолчанию.
+Sources (by priority): environment variables → .env in the project root (../.env)
+→ .env in the current directory → defaults.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv
-except ImportError:  # dotenv опционален — environment всё равно работает
+except ImportError:  # dotenv is optional; the environment still works
     load_dotenv = None
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +21,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 def _load_env() -> None:
     if load_dotenv is None:
         return
-    # override=False: реальные переменные окружения важнее .env
+    # override=False: real environment variables take precedence over .env
     load_dotenv(_PROJECT_ROOT / ".env", override=False)
     load_dotenv(override=False)
 
@@ -33,9 +33,9 @@ def _get_int(name: str, default: int) -> int:
     try:
         value = int(raw)
     except ValueError as e:
-        raise ValueError(f"{name} должен быть целым числом, получено {raw!r}") from e
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from e
     if value <= 0:
-        raise ValueError(f"{name} должен быть > 0, получено {value}")
+        raise ValueError(f"{name} must be > 0, got {value}")
     return value
 
 
@@ -44,9 +44,9 @@ def _parse_resolution(raw: str) -> tuple[int, int]:
     try:
         w, h = (int(p) for p in raw.split(":"))
     except ValueError as e:
-        raise ValueError(f"STREAM_RESOLUTION должен быть вида 1280:720, получено {raw!r}") from e
+        raise ValueError(f"STREAM_RESOLUTION must look like 1280:720, got {raw!r}") from e
     if w <= 0 or h <= 0:
-        raise ValueError(f"STREAM_RESOLUTION должен быть положительным, получено {raw!r}")
+        raise ValueError(f"STREAM_RESOLUTION must be positive, got {raw!r}")
     return w, h
 
 
@@ -62,7 +62,7 @@ class CaptureConfig:
     width: int = 1280
     height: int = 720
 
-    # Аудио формат (фиксирован под Whisper: 16 kHz, s16le, mono)
+    # Audio format (fixed for Whisper: 16 kHz, s16le, mono)
     audio_sample_rate: int = 16000
     audio_channels: int = 1
     audio_sample_width: int = 2  # bytes (s16le)
@@ -72,13 +72,13 @@ class CaptureConfig:
     # Reconnect backoff: 1s, 2s, 4s, ... max 30s
     backoff_initial: float = 1.0
     backoff_max: float = 30.0
-    # Если поток проработал дольше этого — backoff сбрасывается до initial
+    # If the stream ran longer than this, backoff resets to initial
     backoff_reset_after: float = 60.0
 
     resolve_timeout: float = 30.0
 
-    # Watchdog: ffmpeg без данных дольше этого → kill → обычный reconnect.
-    # До первого чанка даём больше (буферизация HLS на старте).
+    # Watchdog: ffmpeg silent longer than this → kill → normal reconnect.
+    # Allow more before the first chunk (HLS buffering at startup).
     stall_timeout: float = 15.0
     startup_timeout: float = 45.0
 

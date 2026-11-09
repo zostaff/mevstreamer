@@ -1,6 +1,6 @@
-"""Vision pipeline: OCR → адреса/тикеры → платформа/действия.
+"""Vision pipeline: OCR → addresses/tickers → platform/actions.
 
-Standalone тест на скриншоте:
+Standalone test on a screenshot:
     python pipeline.py screenshot.jpg
     python pipeline.py screenshot.jpg --engine tesseract --full --json
 """
@@ -17,7 +17,7 @@ try:
     from .mint_repair import MintVerifier
     from .ocr import DEFAULT_ROIS, FULL_FRAME_ROIS, OCREngine, frame_to_array, resolve_engine
     from .ui_recognizer import UIRecognizer
-except ImportError:  # python pipeline.py из папки vision/
+except ImportError:  # python pipeline.py from the vision/ directory
     from config import VisionConfig
     from detector import TokenDetector
     from metrics import extract_metrics, title_candidate
@@ -36,9 +36,9 @@ class VisionResult:
     timestamp: float
     processing_ms: float
     timings_ms: dict = field(default_factory=dict)
-    # market_cap_usd / liquidity_usd / holders с экрана — для опознания токена без адреса
+    # on-screen market_cap_usd / liquidity_usd / holders — to identify a token without its address
     metrics: dict = field(default_factory=dict)
-    text_blocks: list[dict] = field(default_factory=list)  # сырой OCR — для отладки
+    text_blocks: list[dict] = field(default_factory=list)  # raw OCR, for debugging
 
     def to_dict(self, include_text: bool = False) -> dict:
         d = asdict(self)
@@ -58,7 +58,7 @@ class VisionPipeline:
         engine = resolve_engine(config.ocr_engine)
         full = config.roi_mode == "full" or (config.roi_mode == "auto" and engine == "applevision")
         rois = FULL_FRAME_ROIS if full else DEFAULT_ROIS
-        # Тяжёлая инициализация (EasyOCR Reader) — один раз здесь
+        # Heavy initialization (EasyOCR Reader) happens once, here
         self.ocr = OCREngine(
             engine=engine, gpu=config.ocr_gpu,
             min_confidence=config.ocr_min_confidence, rois=rois,
@@ -68,8 +68,8 @@ class VisionPipeline:
         self.ui_recognizer = UIRecognizer() if config.ui_detection else None
 
     def process_frame(self, frame_bytes, width: int = 1280, height: int = 720, timestamp: float | None = None) -> VisionResult:
-        """frame_bytes: RGB bytes (W*H*3) или numpy (H, W, 3).
-        timestamp: время захвата из ingestion (ts из очереди); по умолчанию — сейчас."""
+        """frame_bytes: RGB bytes (W*H*3) or numpy (H, W, 3).
+        timestamp: capture time from ingestion (queue ts); defaults to now."""
         t0 = time.perf_counter()
         ts = time.time() if timestamp is None else timestamp
         frame = frame_to_array(frame_bytes, width, height)
@@ -90,7 +90,7 @@ class VisionPipeline:
                 metrics["title"] = title
         timings["detect"] = _ms(t)
 
-        # OCR испортил mint (1→I, 2→Z, …): восстановить и проверить on-chain (кеш по строке).
+        # OCR corrupted the mint (1→I, 2→Z, …): repair and verify on-chain (cached per string).
         if self.mint_verifier is not None and not any(a["type"] == "mint" for a in addresses):
             near = self.detector.find_near_mints(blocks)
             if near:
@@ -137,15 +137,15 @@ def _main(argv=None) -> int:
     import numpy as np
     from PIL import Image
 
-    ap = argparse.ArgumentParser(description="Vision pipeline на одном скриншоте")
-    ap.add_argument("image", help="путь к скриншоту (jpg/png)")
-    ap.add_argument("--engine", choices=["auto", "applevision", "easyocr", "tesseract"], help="перекрывает OCR_ENGINE")
-    ap.add_argument("--cpu", action="store_true", help="EasyOCR без GPU")
-    ap.add_argument("--full", action="store_true", help="OCR по всему фрейму вместо ROI")
-    ap.add_argument("--no-ui", action="store_true", help="без распознавания платформы/действий")
-    ap.add_argument("--resize", action="store_true", help="привести к 1280x720 как в стриме")
-    ap.add_argument("--text", action="store_true", help="показать все OCR-блоки")
-    ap.add_argument("--json", action="store_true", help="вывод JSON")
+    ap = argparse.ArgumentParser(description="Vision pipeline on a single screenshot")
+    ap.add_argument("image", help="path to screenshot (jpg/png)")
+    ap.add_argument("--engine", choices=["auto", "applevision", "easyocr", "tesseract"], help="overrides OCR_ENGINE")
+    ap.add_argument("--cpu", action="store_true", help="EasyOCR without GPU")
+    ap.add_argument("--full", action="store_true", help="OCR the full frame instead of ROIs")
+    ap.add_argument("--no-ui", action="store_true", help="skip platform/action recognition")
+    ap.add_argument("--resize", action="store_true", help="resize to 1280x720 as in the stream")
+    ap.add_argument("--text", action="store_true", help="show all OCR blocks")
+    ap.add_argument("--json", action="store_true", help="JSON output")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -176,19 +176,19 @@ def _main(argv=None) -> int:
     print(f"\n{args.image}  {width}x{height}  engine={cfg.ocr_engine} rois={cfg.roi_mode}")
     print(f"init {init_ms} ms | frame {result.processing_ms} ms {result.timings_ms}")
     if args.text:
-        print(f"\nOCR ({len(result.text_blocks)} блоков):")
+        print(f"\nOCR ({len(result.text_blocks)} blocks):")
         for b in result.text_blocks:
             print(f"  [{b['roi']:<11}] {b['confidence']:.2f} {b['bbox']}  {b['text']}")
-    print("\nАдреса:")
+    print("\nAddresses:")
     for a in result.addresses or [None]:
         print(f"  {a['type']:<6} {a['confidence']:.2f}  {a['address']}  ({a['source']})" if a else "  —")
-    print(f"Метрики: {result.metrics or '—'}")
-    print("Тикеры:")
+    print(f"Metrics: {result.metrics or '—'}")
+    print("Tickers:")
     for tk in result.tickers or [None]:
         print(f"  {tk['confidence']:.2f}  ${tk['ticker']}" if tk else "  —")
     if pipe.ui_recognizer is not None:
-        print(f"Платформа: {result.platform or '—'} ({result.platform_confidence:.2f})")
-        print("Действия:")
+        print(f"Platform: {result.platform or '—'} ({result.platform_confidence:.2f})")
+        print("Actions:")
         for ac in result.actions or [None]:
             print(f"  {ac['confidence']:.2f}  {ac['action']}" if ac else "  —")
     return 0

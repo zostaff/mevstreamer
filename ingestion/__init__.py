@@ -1,4 +1,4 @@
-"""Ingestion: захват видео фреймов и аудио чанков из live-стримов."""
+"""Ingestion: capture video frames and audio chunks from live streams."""
 
 from .capture import (
     MultiStreamCapture,

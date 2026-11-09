@@ -1,9 +1,9 @@
-"""Аудио пайплайн: PCM чанк → транскрипт → торговые сигналы + тикеры.
+"""Audio pipeline: PCM chunk → transcript → trading signals + tickers.
 
 Standalone:
-    python pipeline.py stream.wav                 # обработать файл чанками по 3с
+    python pipeline.py stream.wav                 # process the file in 3s chunks
     python pipeline.py stream.mp3 --model tiny.en --device cpu
-    python pipeline.py --text "aping into PEPE right now"   # без Whisper
+    python pipeline.py --text "aping into PEPE right now"   # no Whisper
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ from pathlib import Path
 
 import numpy as np
 
-try:  # как пакет (from audio import AudioPipeline)
+try:  # as a package (from audio import AudioPipeline)
     from .keyword_spotter import KeywordSpotter
     from .transcriber import RealtimeTranscriber, resample
-except ImportError:  # как скрипт (python pipeline.py)
+except ImportError:  # as a script (python pipeline.py)
     from keyword_spotter import KeywordSpotter
     from transcriber import RealtimeTranscriber, resample
 
@@ -47,7 +47,7 @@ def _env_float(name: str, default: float) -> float:
     try:
         return float(raw)
     except ValueError as e:
-        raise ValueError(f"{name} должен быть числом, получено {raw!r}") from e
+        raise ValueError(f"{name} must be a number, got {raw!r}") from e
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -60,11 +60,11 @@ def _env_bool(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class AudioConfig:
     whisper_model: str = "base.en"
-    whisper_device: str = "auto"          # auto: cuda, если доступна, иначе cpu
+    whisper_device: str = "auto"          # auto: cuda if available, else cpu
     whisper_compute_type: str | None = None
     vad_rms_threshold: float = 0.01
     use_silero_vad: bool = True
-    # Сколько слов прошлого чанка держать для фраз, разрезанных границей
+    # Words of the previous chunk to keep for phrases split by a chunk boundary
     context_words: int = 8
 
     @classmethod
@@ -93,7 +93,7 @@ class AudioResult:
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def __getitem__(self, key: str):  # result["signals"] тоже работает
+    def __getitem__(self, key: str):  # result["signals"] works too
         return getattr(self, key)
 
 
@@ -101,7 +101,7 @@ class AudioPipeline:
     def __init__(self, config: AudioConfig | None = None, transcriber=None):
         config = config or AudioConfig.from_env()
         self.config = config
-        # WhisperModel создаётся один раз здесь; transcriber можно подменить в тестах
+        # WhisperModel is created once here; transcriber can be swapped in tests
         self.transcriber = transcriber or RealtimeTranscriber(
             model_size=config.whisper_model,
             device=config.whisper_device,
@@ -113,7 +113,7 @@ class AudioPipeline:
         self._context = ""
 
     def reset(self) -> None:
-        """Сбросить межчанковый контекст (смена стрима / реконнект)."""
+        """Reset cross-chunk context (stream switch / reconnect)."""
         self._context = ""
 
     def process_chunk(self, pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> AudioResult:
@@ -129,14 +129,14 @@ class AudioPipeline:
             words = (self._context + " " + text).split()
             self._context = " ".join(words[-self.config.context_words:])
         else:
-            # Фраза не может продолжаться через тишину
+            # A phrase cannot continue across silence
             self._context = ""
 
         result.processing_ms = int((time.perf_counter() - t0) * 1000)
         return result
 
     async def process_chunk_async(self, pcm_bytes: bytes, sample_rate: int = SAMPLE_RATE) -> AudioResult:
-        """Для asyncio-пайплайна: Whisper блокирующий, уводим в thread pool."""
+        """For the asyncio pipeline: Whisper blocks, so run it in a thread pool."""
         return await asyncio.to_thread(self.process_chunk, pcm_bytes, sample_rate)
 
 
@@ -144,7 +144,7 @@ class AudioPipeline:
 
 
 def load_audio_pcm(path: str) -> bytes:
-    """Файл → PCM s16le 16kHz mono. WAV читается напрямую, остальное — через ffmpeg."""
+    """File → PCM s16le 16kHz mono. WAV is read directly, everything else via ffmpeg."""
     try:
         with wave.open(path, "rb") as wf:
             rate, ch, width = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
@@ -156,10 +156,10 @@ def load_audio_pcm(path: str) -> bytes:
             audio = resample(audio, rate, SAMPLE_RATE)
             return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
     except (wave.Error, EOFError):
-        pass  # не PCM WAV (float, mp3, ...) — пробуем ffmpeg
+        pass  # not a PCM WAV (float, mp3, ...): try ffmpeg
 
     if not shutil.which("ffmpeg"):
-        raise SystemExit(f"{path}: не 16-bit PCM WAV, а ffmpeg не найден для конвертации")
+        raise SystemExit(f"{path}: not a 16-bit PCM WAV and ffmpeg was not found for conversion")
     proc = subprocess.run(
         ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", path,
          "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"],
@@ -184,21 +184,21 @@ def _run_text(text: str, as_json: bool) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Транскрипция + детекция торговых фраз")
-    ap.add_argument("audio", nargs="?", help="аудиофайл (wav/mp3/...)")
-    ap.add_argument("--text", help="проверить только keyword spotter на тексте")
-    ap.add_argument("--model", help="whisper модель (по умолчанию WHISPER_MODEL)")
-    ap.add_argument("--device", help="cuda|cpu|auto (по умолчанию WHISPER_DEVICE)")
+    ap = argparse.ArgumentParser(description="Transcription + trading phrase detection")
+    ap.add_argument("audio", nargs="?", help="audio file (wav/mp3/...)")
+    ap.add_argument("--text", help="run only the keyword spotter on text")
+    ap.add_argument("--model", help="whisper model (default: WHISPER_MODEL)")
+    ap.add_argument("--device", help="cuda|cpu|auto (default: WHISPER_DEVICE)")
     ap.add_argument("--chunk-sec", type=float, default=3.0)
-    ap.add_argument("--json", action="store_true", help="JSON lines на чанк")
-    ap.add_argument("--all", action="store_true", help="показывать и чанки без детекций")
+    ap.add_argument("--json", action="store_true", help="JSON lines per chunk")
+    ap.add_argument("--all", action="store_true", help="also show chunks without detections")
     args = ap.parse_args(argv)
 
     if args.text:
         _run_text(args.text, args.json)
         return 0
     if not args.audio:
-        ap.error("укажите аудиофайл или --text")
+        ap.error("specify an audio file or --text")
 
     cfg = AudioConfig.from_env()
     overrides = {k: v for k, v in (("whisper_model", args.model), ("whisper_device", args.device)) if v}

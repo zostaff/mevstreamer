@@ -1,20 +1,20 @@
-"""Unix Domain Socket клиент → Rust executor.
+"""Unix domain socket client → Rust executor.
 
-Протокол (NDJSON, одна строка = одно сообщение):
+Protocol (NDJSON, one line = one message):
 
   → {"mint": "...", "ticker": "...", "action": "buy", "confidence": 0.85,
      "source": "both", "context": "OCR: mint on Photon + Audio: 'aping in'",
      "timestamp": 1699999999.123}\\n
-  ← {"status": "ack"}\\n                      — принято
-  ← {"status": "error", "error": "..."}\\n    — отклонено
+  ← {"status": "ack"}\\n                      — accepted
+  ← {"status": "error", "error": "..."}\\n    — rejected
 
-Также принимаются {"ok": true/false} и голые строки "ack" / "ok".
+{"ok": true/false} and bare "ack" / "ok" strings are also accepted.
 
-Соединение открывается на каждый сигнал (UDS connect ≈ десятки µs) и
-повторных отправок НЕТ: при обрыве после write нельзя понять, исполнил ли
-executor сигнал, а повтор buy-команды = двойная покупка.
+A connection is opened per signal (UDS connect ≈ tens of µs) and there are
+NO retries: after a drop post-write there is no way to tell whether the
+executor ran the signal, and a repeated buy = a double buy.
 
-Mock executor для отладки без Rust:
+Mock executor for debugging without Rust:
     python signal/ipc.py --mock
 """
 
@@ -56,15 +56,15 @@ class ExecutorClient:
         self._last_warn: dict[str, float] = {}
 
     def _warn(self, kind: str, msg: str, *args) -> None:
-        """Rate-limited warning: при лежащем executor не спамить на каждый фрейм."""
+        """Rate-limited warning: don't spam every frame while the executor is down."""
         now = time.monotonic()
         if now - self._last_warn.get(kind, 0.0) >= self.warn_interval_sec:
             self._last_warn[kind] = now
             log.warning(msg, *args)
 
     async def send_signal(self, signal) -> ExecutorResponse | None:
-        """Отправить сигнал. None — не доставлен (executor недоступен / IPC error).
-        status="unknown" — отправлен, но ответа не дождались (мог исполниться)."""
+        """Send a signal. None: not delivered (executor unavailable / IPC error).
+        status="unknown": sent but no reply received (may have executed)."""
         payload = signal.to_dict() if hasattr(signal, "to_dict") else dict(signal)
         data = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         t0 = time.perf_counter()
@@ -74,7 +74,7 @@ class ExecutorClient:
                 asyncio.open_unix_connection(self.socket_path), self.connect_timeout
             )
         except (FileNotFoundError, ConnectionRefusedError):
-            self._warn("down", "executor не запущен (%s) — сигнал не отправлен", self.socket_path)
+            self._warn("down", "executor not running (%s) — signal not sent", self.socket_path)
             return None
         except (OSError, asyncio.TimeoutError) as e:
             self._warn("connect", "executor connect failed (%s): %s", self.socket_path, e or type(e).__name__)
@@ -85,9 +85,9 @@ class ExecutorClient:
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), self.response_timeout)
         except asyncio.TimeoutError:
-            # Сигнал уже записан в сокет: executor мог его принять и исполнить —
-            # это НЕ «failed» и повторять нельзя (двойная покупка).
-            log.warning("executor не ответил за %.1fs — статус: unknown (executor may still execute)",
+            # The signal is already written to the socket: the executor may have accepted and run it,
+            # so this is NOT "failed" and must not be retried (double buy).
+            log.warning("executor did not reply within %.1fs — status: unknown (executor may still execute)",
                         self.response_timeout)
             return ExecutorResponse(ok=False, status="unknown", error="reply timeout (executor may still execute)",
                                     latency_ms=(time.perf_counter() - t0) * 1000)
@@ -102,7 +102,7 @@ class ExecutorClient:
                 pass
 
         if not line:
-            log.warning("executor закрыл соединение без ответа")
+            log.warning("executor closed the connection without replying")
             return None
         resp = self._parse(line.decode(errors="replace").strip())
         return ExecutorResponse(**{**resp.__dict__, "latency_ms": (time.perf_counter() - t0) * 1000})
@@ -121,7 +121,7 @@ class ExecutorClient:
         err = None if ok else str(obj.get("error") or obj.get("message") or status or "error")
         return ExecutorResponse(ok=ok, status=status or ("ack" if ok else "error"), error=err, raw=obj)
 
-    async def close(self) -> None:  # соединения не держим — для симметрии API
+    async def close(self) -> None:  # no persistent connection; kept for API symmetry
         return None
 
 
@@ -161,7 +161,7 @@ if __name__ == "__main__":
     import argparse
 
     p = argparse.ArgumentParser(description="IPC utils")
-    p.add_argument("--mock", action="store_true", help="запустить mock executor (ack на всё)")
+    p.add_argument("--mock", action="store_true", help="run a mock executor (acks everything)")
     p.add_argument("--socket", default=os.getenv("IPC_SOCKET_PATH", IPC_SOCKET_PATH))
     a = p.parse_args()
     if a.mock:

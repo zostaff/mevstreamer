@@ -1,9 +1,9 @@
-"""Real-time транскрипция PCM чанков через faster-whisper (CTranslate2).
+"""Real-time transcription of PCM chunks via faster-whisper (CTranslate2).
 
-Скорость моделей (на чанк 3 сек):
-    tiny.en   — ~30ms   (CPU ok, низкое качество)
-    small.en  — ~100ms  (GPU recommended, хорошее качество)
-    medium.en — ~300ms  (GPU required, лучшее качество)
+Model speed (per 3 s chunk):
+    tiny.en   — ~30ms   (CPU ok, low quality)
+    small.en  — ~100ms  (GPU recommended, good quality)
+    medium.en — ~300ms  (GPU required, best quality)
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Подсказка декодеру: только нейтральная лексика. На шуме/музыке Whisper
-# «галлюцинирует» сам prompt — поэтому в нём НЕТ buy-фраз и тикеров (раньше
-# "Aping into $PEPE…" из prompt'а превращался в ложный BUY).
+# Decoder hint: neutral vocabulary only. On noise/music Whisper "hallucinates"
+# the prompt itself, so it contains NO buy phrases or tickers (previously
+# "Aping into $PEPE…" from the prompt turned into a false BUY).
 DEFAULT_INITIAL_PROMPT = "Solana, pump.fun, contract address, market cap, liquidity, chart."
 
-# Типичные галлюцинации Whisper на шуме / музыке / тишине.
+# Typical Whisper hallucinations on noise / music / silence.
 _HALLUCINATIONS = {
     "you", "thank you", "thanks for watching", "thank you for watching",
     "thanks for watching!", "please subscribe", "bye", "okay", "so",
@@ -35,7 +35,7 @@ def _words(text: str) -> list[str]:
 
 
 def repeats_prompt(text: str, prompt: str | None, threshold: float = 0.6) -> bool:
-    """Транскрипт в основном повторяет initial_prompt (галлюцинация на шуме)."""
+    """Transcript mostly repeats initial_prompt (hallucination on noise)."""
     if not prompt:
         return False
     pw = set(_words(prompt))
@@ -47,7 +47,7 @@ def repeats_prompt(text: str, prompt: str | None, threshold: float = 0.6) -> boo
 
 
 def _resolve_device(device: str) -> str:
-    """cuda → cpu fallback, если CUDA недоступна (например, macOS)."""
+    """cuda → cpu fallback when CUDA is unavailable (e.g. macOS)."""
     if device not in ("cuda", "auto"):
         return device
     try:
@@ -55,10 +55,10 @@ def _resolve_device(device: str) -> str:
 
         if ctranslate2.get_cuda_device_count() > 0:
             return "cuda"
-    except Exception:  # noqa: BLE001 — нет CUDA-рантайма = нет CUDA
+    except Exception:  # noqa: BLE001 — no CUDA runtime means no CUDA
         pass
     if device == "cuda":
-        log.warning("CUDA недоступна — Whisper переключён на CPU (int8)")
+        log.warning("CUDA unavailable, Whisper falling back to CPU (int8)")
     return "cpu"
 
 
@@ -75,14 +75,14 @@ class RealtimeTranscriber:
         warmup: bool = True,
     ):
         """
-        rms_threshold   — порог RMS (float32, [-1..1]); 0.01 ≈ -40 dBFS.
-                          Чанки тише — Whisper не запускается вообще.
-        use_silero_vad  — дополнительно silero-VAD внутри faster-whisper
-                          (~несколько ms): режет музыку/шум, на которых
-                          Whisper галлюцинирует. RMS-гейт идёт первым.
-        compute_type    — None = float16 на cuda, int8 на cpu.
+        rms_threshold   — RMS threshold (float32, [-1..1]); 0.01 ≈ -40 dBFS.
+                          Quieter chunks skip Whisper entirely.
+        use_silero_vad  — additional silero VAD inside faster-whisper
+                          (a few ms): cuts music/noise that make
+                          Whisper hallucinate. The RMS gate runs first.
+        compute_type    — None = float16 on cuda, int8 on cpu.
         """
-        from faster_whisper import WhisperModel  # тяжёлый импорт — только здесь
+        from faster_whisper import WhisperModel  # heavy import, done only here
 
         self.device = _resolve_device(device)
         self.compute_type = compute_type or ("float16" if self.device == "cuda" else "int8")
@@ -93,7 +93,7 @@ class RealtimeTranscriber:
         self._lock = threading.Lock()
 
         t0 = time.perf_counter()
-        # Модель создаётся ОДИН раз (загрузка 2-5 сек).
+        # The model is created ONCE (loading takes 2-5 s).
         self.model = WhisperModel(
             model_size,
             device=self.device,
@@ -101,19 +101,19 @@ class RealtimeTranscriber:
             cpu_threads=cpu_threads,
         )
         log.info(
-            "Whisper %s загружен на %s/%s за %.1fs",
+            "Whisper %s loaded on %s/%s in %.1fs",
             model_size, self.device, self.compute_type, time.perf_counter() - t0,
         )
         if warmup:
             self._warmup()
 
     def _warmup(self) -> None:
-        """Первый вызов CTranslate2 медленный (аллокации, CUDA kernels) —
-        прогоняем его при старте, а не на первом реальном чанке."""
+        """The first CTranslate2 call is slow (allocations, CUDA kernels), so
+        run it at startup rather than on the first real chunk."""
         rng = np.random.default_rng(0)
         noise = (rng.standard_normal(16000) * 0.05).astype(np.float32)
         with self._lock:
-            # vad_filter=False: иначе silero вырежет шум и декодер не прогреется
+            # vad_filter=False: otherwise silero strips the noise and the decoder never warms up
             segments, _ = self.model.transcribe(
                 noise, beam_size=1, language="en", vad_filter=False,
                 initial_prompt=self.initial_prompt, without_timestamps=True,
@@ -122,7 +122,7 @@ class RealtimeTranscriber:
 
     @staticmethod
     def pcm_to_float(pcm_bytes: bytes) -> np.ndarray:
-        if len(pcm_bytes) % 2:  # битый чанк — отбрасываем последний байт
+        if len(pcm_bytes) % 2:  # corrupt chunk: drop the trailing byte
             pcm_bytes = pcm_bytes[:-1]
         return np.frombuffer(pcm_bytes, np.int16).astype(np.float32) / 32768.0
 
@@ -135,8 +135,8 @@ class RealtimeTranscriber:
     def transcribe_chunk(self, pcm_bytes: bytes, sample_rate: int = 16000) -> dict:
         """PCM (s16le, mono) → {text, language, duration_ms, processing_ms, rms, is_speech}.
 
-        duration_ms   — длительность аудио в чанке
-        processing_ms — сколько заняла обработка
+        duration_ms   — audio duration of the chunk
+        processing_ms — processing time
         """
         t0 = time.perf_counter()
         audio = self.pcm_to_float(pcm_bytes)
@@ -154,7 +154,7 @@ class RealtimeTranscriber:
             "is_speech": False,
         }
 
-        # VAD #1: тишина → Whisper не трогаем
+        # VAD #1: silence → skip Whisper
         if level < self.rms_threshold:
             result["processing_ms"] = int((time.perf_counter() - t0) * 1000)
             return result
@@ -162,15 +162,15 @@ class RealtimeTranscriber:
         with self._lock:
             segments, info = self.model.transcribe(
                 audio,
-                beam_size=1,                 # greedy — минимальная latency
-                language="en",               # без language detection
-                temperature=0.0,             # без fallback-перекодирования
+                beam_size=1,                 # greedy: minimal latency
+                language="en",               # no language detection
+                temperature=0.0,             # no temperature fallback re-decoding
                 condition_on_previous_text=False,
                 without_timestamps=True,
                 initial_prompt=self.initial_prompt,
                 vad_filter=self.use_silero_vad,  # VAD #2: silero
             )
-            # segments — генератор; декодирование реально происходит здесь
+            # segments is a generator; decoding actually happens here
             parts = [s.text.strip() for s in segments if s.no_speech_prob < 0.8]
 
         text = " ".join(p for p in parts if p).strip()
@@ -190,7 +190,7 @@ class RealtimeTranscriber:
 
 
 def resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    """Линейный ресемплинг — достаточно для речи, без scipy."""
+    """Linear resampling: good enough for speech, no scipy."""
     if src_rate == dst_rate or audio.size == 0:
         return audio
     n_out = int(round(audio.size * dst_rate / src_rate))

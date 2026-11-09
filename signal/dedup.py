@@ -1,4 +1,4 @@
-"""Дедупликация сигналов по токену в пределах cooldown."""
+"""Per-token signal deduplication within a cooldown."""
 
 from __future__ import annotations
 
@@ -6,12 +6,12 @@ import time
 
 
 class SignalDedup:
-    """Ключ = action + (mint или $TICKER).
+    """Key = action + (mint or $TICKER).
 
-    action входит в ключ, чтобы sell сразу после buy того же токена не
-    считался дубликатом. Окно не скользящее: если стример «держит» buy-сигнал
-    дольше cooldown_sec, сигнал повторится — executor должен быть идемпотентен
-    по mint (не открывать вторую позицию на тот же токен).
+    action is part of the key so a sell right after a buy of the same token is
+    not a duplicate. The window is not sliding: if the streamer "holds" a buy signal
+    longer than cooldown_sec, it repeats, so the executor must be idempotent
+    per mint (never open a second position on the same token).
     """
 
     def __init__(self, cooldown_sec: float = 60):

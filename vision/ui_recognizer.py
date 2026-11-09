@@ -1,7 +1,7 @@
-"""Распознавание торговой платформы и действий стримера.
+"""Recognizes the trading platform and the streamer's actions.
 
-Только дешёвые эвристики (цвета, формы блобов, ключевые слова OCR) — без ML.
-Работает на прореженном фрейме (каждый 4-й пиксель → 320x180 при 720p).
+Cheap heuristics only (colors, blob shapes, OCR keywords) — no ML.
+Runs on a subsampled frame (every 4th pixel → 320x180 at 720p).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ except ImportError:
 
 _STRIDE = 4
 
-# Самый сильный сигнал — домен/бренд в адресной строке или в логотипе
+# Strongest signal: the domain/brand in the address bar or logo
 _TEXT_HINTS = {
     "photon": ("photon-sol", "photon"),
     "bullx": ("bullx",),
@@ -43,18 +43,18 @@ _TOKEN_PAGE_RE = re.compile(
 
 
 def _color_mask(img: np.ndarray, rgb, tol: int = 60) -> np.ndarray:
-    d = img.astype(np.int32) - np.asarray(rgb, dtype=np.int32)  # int16 переполнится на d*d
+    d = img.astype(np.int32) - np.asarray(rgb, dtype=np.int32)  # int16 would overflow on d*d
     return (d * d).sum(axis=-1) <= tol * tol
 
 
 def _blobs(mask: np.ndarray) -> list[tuple[int, int, int, int, int]]:
-    """Связные компоненты → [(x, y, w, h, area)]."""
+    """Connected components → [(x, y, w, h, area)]."""
     if not mask.any():
         return []
     if cv2 is not None:
         n, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
         return [tuple(int(v) for v in stats[i]) for i in range(1, n)]
-    # fallback без cv2: BFS по прореженной маске (маленькая, это быстро)
+    # fallback without cv2: BFS over the subsampled mask (small, so fast)
     h, w = mask.shape
     seen = np.zeros_like(mask, dtype=bool)
     out = []
@@ -118,8 +118,8 @@ class UIRecognizer:
     def detect_platform(self, frame_bytes, width: int = 1280, height: int = 720, ocr_results=None) -> dict:
         """→ {platform: str|None, confidence: float, scores: {platform: score}}.
 
-        ocr_results (опционально) — даёт текстовые подсказки (домен в URL bar),
-        которые надёжнее цветов: у photon/gmgn/dexscreener почти одинаковые тёмные темы.
+        ocr_results (optional) provides text hints (domain in the URL bar),
+        which beat colors: photon/gmgn/dexscreener have nearly identical dark themes.
         """
         small = frame_to_array(frame_bytes, width, height)[::_STRIDE, ::_STRIDE]
         sh, sw = small.shape[:2]
@@ -137,7 +137,7 @@ class UIRecognizer:
                 score += 0.25 * _clamp(dark_ratio / 0.6)
             accents = [v for k, v in colors.items() if k != "dominant_dark"]
             if accents:
-                # 1% пикселей нужного цвета — уже характерный акцент
+                # 1% of pixels in the target color is already a distinctive accent
                 fracs = [_clamp(float(_color_mask(small, c, 50).mean()) / 0.01) for c in accents]
                 score += 0.2 * sum(fracs) / len(fracs)
             if "buy_button_color" in spec and self._has_button(right, spec["buy_button_color"], sh * sw):
@@ -150,26 +150,26 @@ class UIRecognizer:
 
         ranked = sorted(scores.items(), key=lambda kv: -kv[1])
         (best, s1), (_, s2) = ranked[0], ranked[1]
-        # штраф за неоднозначность: если второй кандидат близко — уверенность низкая
+        # ambiguity penalty: if the runner-up is close, confidence is low
         confidence = round(_clamp(s1 - 0.5 * s2), 3)
         platform = best if confidence >= self.MIN_PLATFORM_CONFIDENCE else None
         return {"platform": platform, "confidence": confidence, "scores": scores}
 
     @staticmethod
     def _has_button(region: np.ndarray, rgb, frame_area: int) -> bool:
-        """Залитый прямоугольник цвета кнопки: вытянутый по X, 0.05–3% площади фрейма."""
+        """Filled rectangle in the button color: wide in X, 0.05–3% of frame area."""
         for x, y, w, h, area in _blobs(_color_mask(region, rgb, 45)):
             if h < 3 or not 1.5 <= w / h <= 10:
                 continue
             if not 0.0005 * frame_area <= area <= 0.03 * frame_area:
                 continue
-            if area / (w * h) > 0.7:  # «заливка», а не контур/свечи графика
+            if area / (w * h) > 0.7:  # a fill, not an outline or chart candles
                 return True
         return False
 
     @staticmethod
     def _has_progress_bar(img: np.ndarray, colors) -> bool:
-        """Тонкая длинная горизонтальная полоса (bonding curve progress)."""
+        """Thin, long horizontal bar (bonding curve progress)."""
         sw = img.shape[1]
         for rgb in colors:
             for x, y, w, h, area in _blobs(_color_mask(img, rgb, 50)):
@@ -182,11 +182,11 @@ class UIRecognizer:
     def detect_actions(
         self, frame_bytes, ocr_results, platform, width: int = 1280, height: int = 720, addresses=None
     ) -> list[dict]:
-        """→ [{action, confidence}] по убыванию confidence.
+        """→ [{action, confidence}] by descending confidence.
 
-        Без известной платформы эвристики тоже работают, но с пониженной
-        уверенностью (×0.7) — стример может сидеть на неизвестном терминале.
-        addresses (опционально) — результат TokenDetector.find_addresses.
+        Without a known platform the heuristics still work, but with reduced
+        confidence (×0.7) — the streamer may be on an unknown terminal.
+        addresses (optional) is the output of TokenDetector.find_addresses.
         """
         frame = frame_to_array(frame_bytes, width, height)
         fh = frame.shape[0]
@@ -205,10 +205,10 @@ class UIRecognizer:
             t = b["text"].lower()
             ctx = self._nearby_text(blocks, b)
 
-            # bought / sold: тост "Success"/"Confirmed". Голое "confirmed"/"success"
-            # (tx-статус, чат, баннеры) — НЕ покупка: нужно явное слово действия в
-            # самом тосте (строка блока + та же строка/строка под ней), а для bought —
-            # ещё и зелёный фон. Кнопки Buy/Sell рядом (ctx) не в счёт.
+            # bought / sold: a "Success"/"Confirmed" toast. A bare "confirmed"/"success"
+            # (tx status, chat, banners) is NOT a buy: requires an explicit action word in
+            # the toast itself (block line + same line/line below), and for bought,
+            # also a green background. Nearby Buy/Sell buttons (ctx) don't count.
             if _SUCCESS_RE.search(t):
                 toast = self._toast_text(blocks, b)
                 if _SELL_RE.search(toast):
@@ -217,22 +217,22 @@ class UIRecognizer:
                 elif _BUY_RE.search(toast) and self._is_greenish_around(frame, b["bbox"]):
                     add("bought", 0.85)
 
-            # about_to_buy / about_to_sell: окно подтверждения
+            # about_to_buy / about_to_sell: confirmation dialog
             if _CONFIRM_RE.search(t):
                 if _SELL_RE.search(ctx):
                     add("about_to_sell", 0.65 + 0.2 * modal)
                 elif _BUY_RE.search(ctx):
                     add("about_to_buy", 0.65 + 0.2 * modal)
 
-            # searching: плейсхолдер "Search..." висит в header всегда, поэтому
-            # считаем только если поиск открыт в модалке/дропдауне ниже header'а
+            # searching: the "Search..." placeholder is always in the header, so
+            # count it only when search is open in a modal/dropdown below the header
             if _SEARCH_RE.search(t):
                 if modal:
                     add("searching", 0.75)
                 elif bbox_cy(b) > 0.15 * fh:
                     add("searching", 0.55)
 
-        # viewing_token: суммируем признаки страницы токена
+        # viewing_token: sum up token-page signals
         alltext = " ".join(b["text"].lower() for b in blocks)
         signal = 0.0
         if addresses and any(a["type"] == "mint" for a in addresses):
@@ -250,7 +250,7 @@ class UIRecognizer:
 
     @staticmethod
     def _nearby_text(blocks: list[dict], b: dict) -> str:
-        """Текст блока + соседей в пределах ~3 строк (заголовок/кнопки тоста или попапа)."""
+        """Text of the block + neighbors within ~3 lines (toast/popup title and buttons)."""
         h = bbox_height(b)
         cy = bbox_cy(b)
         x1, _, x2, _ = b["bbox"]
@@ -263,8 +263,8 @@ class UIRecognizer:
 
     @staticmethod
     def _toast_text(blocks: list[dict], b: dict) -> str:
-        """Текст самого тоста: блок + соседи на той же строке или ≤1.5 строки
-        ниже/выше, горизонтально перекрывающиеся с блоком (без кнопок в стороне)."""
+        """Text of the toast itself: block + neighbors on the same line or ≤1.5 lines
+        below/above that overlap the block horizontally (no side buttons)."""
         h = max(1, bbox_height(b))
         cy = bbox_cy(b)
         x1, _, x2, _ = b["bbox"]
@@ -277,7 +277,7 @@ class UIRecognizer:
 
     @staticmethod
     def _is_greenish_around(frame: np.ndarray, bbox) -> bool:
-        """Зелёный фон/иконка вокруг текста — признак success-тоста."""
+        """Green background/icon around the text — marks a success toast."""
         x1, y1, x2, y2 = bbox
         pad = max(4, (y2 - y1) // 2)
         h, w = frame.shape[:2]
@@ -290,8 +290,8 @@ class UIRecognizer:
 
     @staticmethod
     def _detect_modal(small: np.ndarray) -> bool:
-        """Модалка: в центре большой однотонный прямоугольник, цвета которого
-        почти нет по краям экрана (фон под оверлеем другой)."""
+        """Modal: a large solid rectangle in the center whose color
+        is nearly absent at the screen edges (the background under the overlay differs)."""
         h, w = small.shape[:2]
         q = (small >> 4).astype(np.int32)
         codes = (q[..., 0] << 8) | (q[..., 1] << 4) | q[..., 2]

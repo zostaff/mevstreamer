@@ -23,45 +23,45 @@
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
-**Стример открывает токен — бот уже в нём.** Python смотрит стрим и слушает голос: OCR кадра, Whisper, скоринг. Rust-executor за один RPC round-trip квотирует pump.fun bonding curve или PumpSwap-пул, подписывает одну транзакцию и рассылает её сразу в Helius Sender, Jito и RPC. Дальше — TP / SL / trailing / timeout по реальной стоимости позиции и журнал, переживающий рестарт.
+**The streamer opens a token — the bot is already in.** Python watches the stream and listens to the voice: frame OCR, Whisper, scoring. The Rust executor quotes the pump.fun bonding curve or the PumpSwap pool in a single RPC round trip, signs one transaction and fans it out to Helius Sender, Jito and RPC at once. Then TP / SL / trailing / timeout on the position's real value, and a journal that survives restarts.
 
 <p align="center"><img src="assets/terminal.svg" width="100%" alt="terminal"></p>
 
-<sub>Терминал — сборка из реальных строк логов dry-run на mainnet (цифры OCR, Whisper, CU, опознание $JIMOTHY и итог сессии — замеры). Сделка на обложке — пример.</sub>
+<sub>The terminal is assembled from real mainnet dry-run log lines (OCR, Whisper, CU, the $JIMOTHY identification and the session result are measured). The trade on the cover is an example.</sub>
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
 <a id="01--quick-start"></a>
 <p align="center"><img src="assets/section-01.svg" width="100%" alt="01 quick start"></p>
 
-Нужны Python 3.11+ (лучше 3.13), Rust, `ffmpeg`.
+Requires Python 3.11+ (3.13 preferred), Rust, `ffmpeg`.
 
 ```bash
-./scripts/build.sh            # .venv, зависимости, cargo build --release, .env
-$EDITOR .env                  # RPC_URL, STREAM_URL; WALLET_PRIVATE_KEY только для live
-./scripts/check.sh            # 43 rust-теста, 56 unit checks, smoke — без стрима и GPU
+./scripts/build.sh            # .venv, dependencies, cargo build --release, .env
+$EDITOR .env                  # RPC_URL, STREAM_URL; WALLET_PRIVATE_KEY for live only
+./scripts/check.sh            # 43 rust tests, 56 unit checks, smoke — no stream or GPU needed
 ```
 
-Три режима, по нарастающей:
+Three modes, in increasing order of risk:
 
 ```bash
-./scripts/monitor.sh --stream "kick.com/name"   # только сигналы, никуда не уходят
-./scripts/dry-run.sh --stream "kick.com/name"   # настоящая tx симулируется на mainnet, позиция бумажная
-./scripts/run.sh     --stream "kick.com/name"   # live: DRY_RUN=false, ключ и ввод LIVE
+./scripts/monitor.sh --stream "kick.com/name"   # signals only, nothing is sent
+./scripts/dry-run.sh --stream "kick.com/name"   # real tx simulated on mainnet, paper position
+./scripts/run.sh     --stream "kick.com/name"   # live: DRY_RUN=false, a key, and typing LIVE
 ```
 
-Перед первым live:
+Before the first live run:
 
 ```bash
 X=executor/target/release/mev-streamer-executor
-$X --new-wallet ~/mevs-key.txt      # отдельный hot-кошелёк
-$X --selfcheck     <MINT на кривой> # buy + полный выход против mainnet-симуляции, до лампорта
-$X --selfcheck-amm <MINT на пуле>   # то же для PumpSwap
-$X --probe-relays                   # релеи принимают формат? ничего не тратит
+$X --new-wallet ~/mevs-key.txt      # a dedicated hot wallet
+$X --selfcheck     <curve MINT>     # buy + full exit vs mainnet simulation, to the lamport
+$X --selfcheck-amm <pool MINT>      # same for PumpSwap
+$X --probe-relays                   # do relays accept the format? spends nothing
 ```
 
 > [!IMPORTANT]
-> Сначала paper. Базовая линия — случайные свежие токены, выход по таймауту: **13 сделок, 0 побед, −2.65%** — это ровно комиссии. Сигнал со стрима должен давать больше ~2.5% на круг, иначе края нет. Результаты бумажных сделок — `logs/trades.dry.jsonl`.
+> Paper first. Baseline — random fresh tokens, exit on timeout: **13 trades, 0 wins, −2.65%**, which is exactly the fees. The stream signal has to beat ~2.5% per round trip or there is no edge. Paper trades are logged to `logs/trades.dry.jsonl`.
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
@@ -70,16 +70,16 @@ $X --probe-relays                   # релеи принимают формат
 
 <p align="center"><img src="assets/flow.svg" width="100%" alt="flow"></p>
 
-| фаза | модуль | что происходит |
+| phase | module | what happens |
 |:---:|---|---|
-| `1` | **capture** | `streamlink`/`yt-dlp` → два `ffmpeg`: кадры 1280×720 @ 3 fps и PCM 16 kHz по 3 с. Backoff 1→30 с, watchdog рвёт зависший HLS через 15 с. Всегда берётся самый свежий кадр — задержка не копится |
-| `2` | **vision** | Apple Vision (ANE) или EasyOCR → mint, `$TICKER`, платформа, действие стримера, market cap / ликвидность / холдеры. Испорченный OCR-ом mint (`1→I`, `2→Z`, `o→0`) чинится и проверяется одним `getMultipleAccounts` |
-| `3` | **audio** | faster-whisper + VAD, keyword spotter ловит buy/sell-фразы и тикеры |
-| `4` | **signal** | окна vision 3 с / audio 10 с, скоринг, cooldown. Mint ≥ 2 кадров; несколько разных mint на экране (чат-оверлей) — BUY не уходит |
-| `5` | **quote** | один round-trip: кривая + mint + канонический пул + хранилища ‖ priority fee ‖ blockhash ‖ баланс. Кривая жива → v3, мигрировал → PumpSwap v2 |
-| `6` | **land** | одна подпись во все релеи — исполнится максимум один раз. «Не попала» — только когда высота блока перевалила `lastValidBlockHeight`, а не по таймеру |
-| `7` | **manage** | себестоимость — реальная дельта баланса из tx. Выход по стоимости позиции (сколько вернёт продажа всего сейчас, с комиссиями), slippage на выходе растёт до `EXIT_SLIPPAGE_PCT`, ATA закрывается (≈0.002 SOL rent назад) |
-| `8` | **journal** | `logs/positions.json` атомарно + `logs/trades.jsonl`. После рестарта — сверка с on-chain балансами |
+| `1` | **capture** | `streamlink`/`yt-dlp` → two `ffmpeg` processes: 1280×720 frames @ 3 fps and 16 kHz PCM in 3 s chunks. Backoff 1→30 s, a watchdog kills a stalled HLS after 15 s. Always the freshest frame — latency never piles up |
+| `2` | **vision** | Apple Vision (ANE) or EasyOCR → mint, `$TICKER`, platform, streamer action, market cap / liquidity / holders. A mint mangled by OCR (`1→I`, `2→Z`, `o→0`) is repaired and verified with one `getMultipleAccounts` |
+| `3` | **audio** | faster-whisper + VAD, a keyword spotter catches buy/sell phrases and tickers |
+| `4` | **signal** | windows of 3 s (vision) / 10 s (audio), scoring, per-token cooldown. Mint must be seen in ≥ 2 frames; several different mints on screen (chat overlay) → no BUY |
+| `5` | **quote** | one round trip: curve + mint + canonical pool + vaults ‖ priority fee ‖ blockhash ‖ balance. Live curve → v3, migrated → PumpSwap v2 |
+| `6` | **land** | one signature to every relay — executes at most once. "Not landed" only once block height passes `lastValidBlockHeight`, never on a timer |
+| `7` | **manage** | cost basis is the real balance delta of the tx. Exit on position value (what selling everything returns now, after fees); exit slippage escalates up to `EXIT_SLIPPAGE_PCT`; the ATA is closed (≈0.002 SOL rent back) |
+| `8` | **journal** | `logs/positions.json` written atomically + `logs/trades.jsonl`. On restart — reconciled against on-chain balances |
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
@@ -88,26 +88,26 @@ $X --probe-relays                   # релеи принимают формат
 
 <p align="center"><img src="assets/scoring.svg" width="100%" alt="scoring"></p>
 
-Вес mint умножается на 0.8–1.0 по OCR-confidence (восстановленный — не выше 0.9). Подтверждения от стримера — «смотрит токен» +0.10, «на кнопке Buy» +0.30, «купил» +0.40. Сигналы только по тикеру без mint по умолчанию не отправляются (`ALLOW_TICKER_ONLY=false`).
+The mint weight is multiplied by 0.8–1.0 based on OCR confidence (a repaired mint is capped at 0.9). Streamer confirmations — "viewing the token" +0.10, "on the Buy button" +0.30, "bought" +0.40. Ticker-only signals without a mint are not sent by default (`ALLOW_TICKER_ONLY=false`).
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
 <a id="04--no-address"></a>
 <p align="center"><img src="assets/section-04.svg" width="100%" alt="04 no address"></p>
 
-Стримеры редко показывают CA — чаще страницу токена: название, график, капитализация. Тикер у мемкоинов не уникален (десятки копий), а **тикер + market cap** почти всегда однозначны.
+Streamers rarely show the CA — usually it's the token page: name, chart, market cap. Memecoin tickers are not unique (dozens of copies), but **ticker + market cap** almost always is.
 
 ```
- кадр ─┬─▶ $JIMOTHY  (или крупный заголовок страницы)
-       └─▶ MARKET CAP $1.2M · HOLDERS 30,484        ← vision/metrics.py, ATH и объём игнорируются
+ frame ─┬─▶ $JIMOTHY  (or the big page title)
+        └─▶ MARKET CAP $1.2M · HOLDERS 30,484       ← vision/metrics.py, ATH and volume ignored
                     │
                     ▼
- DexScreener: 18 токенов с именем JIMOTHY ──▶ чья текущая MC в ±25% от экранной?
+ DexScreener: 18 tokens named JIMOTHY ──▶ whose current MC is within ±25% of the on-screen one?
                     │
-          ровно один ──▶ Ge87…pump, вес 0.40        несколько / ноль ──▶ не покупаем
+          exactly one ──▶ Ge87…pump, weight 0.40        several / none ──▶ no buy
 ```
 
-На живом эфире: `identified $JIMOTHY at MC $1.20M → Ge87…pump (unique of 18, 682ms)`.
+On a live stream: `identified $JIMOTHY at MC $1.20M → Ge87…pump (unique of 18, 682ms)`.
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
@@ -116,26 +116,26 @@ $X --probe-relays                   # релеи принимают формат
 
 <p align="center"><img src="assets/latency.svg" width="100%" alt="latency"></p>
 
-На CPU без Apple Vision EasyOCR даёт 7–9 с на кадр — там нужен Tesseract или `STREAM_FPS=1`. Свой RPC и релей рядом важнее железа: executor почти всё время ждёт сеть. Задержку самой платформы стрима (секунды) не обогнать.
+On a CPU without Apple Vision, EasyOCR takes 7–9 s per frame — use Tesseract or `STREAM_FPS=1` there. Your own RPC and a nearby relay matter more than hardware: the executor spends almost all its time waiting on the network. The stream platform's own delay (seconds) cannot be beaten.
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
 <a id="06--pump-venues"></a>
 <p align="center"><img src="assets/section-06.svg" width="100%" alt="06 pump venues"></p>
 
-Источник истины — [pump-fun/pump-public-docs](https://github.com/pump-fun/pump-public-docs), IDL от 2026-10-13. Квоты — порт референсной математики `pump-rust-client` (MIT).
+Source of truth — [pump-fun/pump-public-docs](https://github.com/pump-fun/pump-public-docs), IDL of 2026-10-13. Quotes are a port of the reference math in `pump-rust-client` (MIT).
 
 | | bonding curve | PumpSwap |
 |---|---|---|
-| инструкции | `buy_exact_quote_in_v3` / `sell_v3`, 17 аккаунтов | `buy_exact_quote_in_v2` / `sell_v2`, wrap → trade → unwrap в одной tx |
-| комиссии | pump-fees `FeeConfig`, в трейде только buyback-доля | LP / protocol / creator по тирам капитализации |
-| сверка | `--selfcheck`: buy до токена, полный выход до лампорта (3 mayhem-коина) | `--selfcheck-amm`: buy и выход до лампорта (3 пула) |
+| instructions | `buy_exact_quote_in_v3` / `sell_v3`, 17 accounts | `buy_exact_quote_in_v2` / `sell_v2`, wrap → trade → unwrap in one tx |
+| fees | pump-fees `FeeConfig`, only the buyback share paid in-trade | LP / protocol / creator by market-cap tier |
+| verified | `--selfcheck`: buy to the token, full exit to the lamport (3 mayhem coins) | `--selfcheck-amm`: buy and exit to the lamport (3 pools) |
 | compute | buy 70–75k CU, sell 46k | buy 81–84k, round trip 139–143k |
-| round trip сразу | −2.5% | −0.6…−2% |
+| immediate round trip | −2.5% | −0.6…−2% |
 
-Позиция на кривой, которая мигрировала во время удержания, сама переезжает на пул. Mayhem-коины поддерживаются.
+A curve position that graduates while held moves to the pool automatically. Mayhem coins are supported.
 
-**Отклоняется с понятной причиной:** кривая не в SOL, cashback-коины и cashback-пулы, пулы не в wSOL, покупка, пересекающая остаток кривой, продажа больше реальных резервов. Все не-SOL кривые на mainnet заканчивались xStock'ами (`Xs…`, Token-2022), к которым из SOL нет pump-маршрута, — поэтому multi-hop отложен; `--inspect <MINT>` показывает цепочку.
+**Rejected with a clear reason:** non-SOL curves, cashback coins and cashback pools, non-wSOL pools, buys that cross the rest of the curve, sells larger than the real reserves. Every non-SOL curve seen on mainnet ended in xStocks (`Xs…`, Token-2022) with no pump route from SOL, so multi-hop is deferred; `--inspect <MINT>` shows the chain.
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
@@ -144,77 +144,77 @@ $X --probe-relays                   # релеи принимают формат
 
 <p align="center"><img src="assets/risk.svg" width="100%" alt="risk"></p>
 
-- **landing reconcile** — tx, приземлившаяся после «таймаута», не превращается в неучтённые токены и повторную покупку;
-- **single instance** — второй executor на том же сокете не стартует (bind до открытия журнала);
-- **честный paper** — бумажная позиция учитывает собственную покупку на кривой / в пуле, иначе выход считался бы по чужим резервам.
+- **landing reconcile** — a tx that lands after a "timeout" never turns into untracked tokens and a second buy;
+- **single instance** — a second executor on the same socket refuses to start (bind happens before the journal is opened);
+- **honest paper** — a paper position re-applies our own buy to the curve / pool, otherwise exits would be priced against someone else's reserves.
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
 <a id="08--config"></a>
 <p align="center"><img src="assets/section-08.svg" width="100%" alt="08 config"></p>
 
-Все модули читают `.env` из корня, переменные окружения его перекрывают.
+Every module reads `.env` from the repo root; environment variables override it.
 
-| переменная | default | |
+| variable | default | |
 |---|:-:|---|
-| `RPC_URL` | — | свой / Helius — сильно быстрее публичного |
-| `WALLET_PRIVATE_KEY` | пусто | base58; пусто → эфемерный ключ, только DRY_RUN |
-| `STREAM_URL` | — | или `--stream` |
+| `RPC_URL` | — | your own / Helius — much faster than public |
+| `WALLET_PRIVATE_KEY` | empty | base58; empty → ephemeral key, DRY_RUN only |
+| `STREAM_URL` | — | or `--stream` |
 | `DRY_RUN` | `true` | |
-| `BUY_SOL` | — | бюджет входа, комиссии внутри |
-| `TAKE_PROFIT` / `STOP_LOSS` / `TIMEOUT_SEC` | 2.0 / 0.6 / 120 | множители стоимости позиции к себестоимости |
-| `TRAILING_STOP` | 0.25 | от пика, взводится на 1.2×; 0 = выкл |
-| `SLIPPAGE_PCT` / `EXIT_SLIPPAGE_PCT` | 15 / 40 | вход и TP / потолок для SL, timeout, повторов |
+| `BUY_SOL` | — | entry budget, fees included |
+| `TAKE_PROFIT` / `STOP_LOSS` / `TIMEOUT_SEC` | 2.0 / 0.6 / 120 | multiples of position value over cost |
+| `TRAILING_STOP` | 0.25 | from peak, arms at 1.2×; 0 = off |
+| `SLIPPAGE_PCT` / `EXIT_SLIPPAGE_PCT` | 15 / 40 | entry and TP / ceiling for SL, timeout, retries |
 | `MAX_POSITIONS` | 3 | |
 
 <details>
-<summary><b>захват · vision · audio · signal</b></summary>
+<summary><b>capture · vision · audio · signal</b></summary>
 
-| переменная | default | |
+| variable | default | |
 |---|:-:|---|
-| `STREAM_FPS` / `STREAM_AUDIO_CHUNK_SEC` | 3 / 3 | с Apple Vision FPS можно поднять до 5 |
+| `STREAM_FPS` / `STREAM_AUDIO_CHUNK_SEC` | 3 / 3 | with Apple Vision FPS can go up to 5 |
 | `STREAM_RESOLUTION` | `1280:720` | |
-| `CAPTURE_STALL_TIMEOUT_SEC` | 15 | перезапуск ffmpeg без данных |
+| `CAPTURE_STALL_TIMEOUT_SEC` | 15 | restart ffmpeg when no data arrives |
 | `OCR_ENGINE` | `auto` | `applevision` / `easyocr` / `tesseract` |
-| `OCR_GPU` / `OCR_MIN_CONFIDENCE` | true / 0.4 | для EasyOCR |
-| `VISION_ROI_MODE` | `auto` | весь кадр для Apple Vision, зоны для остальных |
-| `VISION_MINT_REPAIR` | true | исправление OCR-ошибок в mint |
-| `UI_DETECTION` | true | платформа и действие |
-| `WHISPER_MODEL` / `WHISPER_DEVICE` | `base.en` / auto | CUDA если есть, иначе CPU int8 |
+| `OCR_GPU` / `OCR_MIN_CONFIDENCE` | true / 0.4 | EasyOCR |
+| `VISION_ROI_MODE` | `auto` | full frame for Apple Vision, zones for the rest |
+| `VISION_MINT_REPAIR` | true | fix OCR errors in mints |
+| `UI_DETECTION` | true | platform and action |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` | `base.en` / auto | CUDA if present, otherwise CPU int8 |
 | `SIGNAL_THRESHOLD` / `SIGNAL_COOLDOWN_SEC` | 0.7 / 60 | |
-| `ALLOW_TICKER_ONLY` | false | BUY без mint на экране — риск копиката |
-| `HELIUS_API_KEY` | из `RPC_URL` | проверка mint при резолве тикера |
+| `ALLOW_TICKER_ONLY` | false | BUY without a mint on screen — copycat risk |
+| `HELIUS_API_KEY` | from `RPC_URL` | mint verification when resolving a ticker |
 
 </details>
 
 <details>
-<summary><b>отправка · комиссии · compute</b></summary>
+<summary><b>sending · fees · compute</b></summary>
 
-| переменная | default | |
+| variable | default | |
 |---|:-:|---|
 | `RELAYS` | `sender,jito` | `sender`, `jito`, `rpc` |
-| `JITO_TIP` / `JITO_TIP_MAX` | `auto` / 0.001 | auto = p75 Jito `tip_floor`, обновление раз в 2 с |
-| `JITO_URLS` | global | несколько регионов через запятую |
-| `SENDER_TIP` / `HELIUS_SENDER_URL` | 0.000005 / `/fast` | ≥ 0.001 → Sender Max, меньше → `?swqos_only=true` |
-| `PRIORITY_FEE` | `auto` | p75 недавних комиссий по этой кривой в `[MIN, MAX]` µL/CU |
-| `CU_LIMIT_BUY` / `CU_LIMIT_SELL` | 90000 / 60000 | кривая |
+| `JITO_TIP` / `JITO_TIP_MAX` | `auto` / 0.001 | auto = p75 of Jito `tip_floor`, refreshed every 2 s |
+| `JITO_URLS` | global | several regions, comma-separated |
+| `SENDER_TIP` / `HELIUS_SENDER_URL` | 0.000005 / `/fast` | ≥ 0.001 → Sender Max, less → `?swqos_only=true` |
+| `PRIORITY_FEE` | `auto` | p75 of recent fees on this curve within `[MIN, MAX]` µL/CU |
+| `CU_LIMIT_BUY` / `CU_LIMIT_SELL` | 90000 / 60000 | curve |
 | `CU_LIMIT_AMM_BUY` / `CU_LIMIT_AMM_SELL` | 100000 / 75000 | PumpSwap |
-| `SIM_PAYER` | системный кошелёк | от чьего имени симулировать в DRY_RUN без ключа |
+| `SIM_PAYER` | a system wallet | who to simulate as in DRY_RUN without a key |
 
 </details>
 
 <details>
-<summary><b>лимиты сессии · журнал · ipc</b></summary>
+<summary><b>session limits · journal · ipc</b></summary>
 
-| переменная | default | |
+| variable | default | |
 |---|:-:|---|
-| `MAX_SESSION_LOSS` | 3 × `BUY_SOL` | реализованный убыток → покупки стоп; 0 = выкл |
+| `MAX_SESSION_LOSS` | 3 × `BUY_SOL` | realized loss → buys stop; 0 = off |
 | `MAX_CONSECUTIVE_LOSSES` | 5 | |
-| `MIN_SOL_RESERVE` | 0.01 | остаток на выход |
-| `MAX_SIGNAL_AGE_MS` | 6000 | от захвата кадра / аудио |
-| `MIN_CONFIDENCE` / `MAX_MCAP_SOL` / `REBUY` | 0 / выкл / false | |
+| `MIN_SOL_RESERVE` | 0.01 | kept for exits |
+| `MAX_SIGNAL_AGE_MS` | 6000 | measured from frame / audio capture |
+| `MIN_CONFIDENCE` / `MAX_MCAP_SOL` / `REBUY` | 0 / off / false | |
 | `MONITOR_INTERVAL_MS` / `STATE_DIR` | 400 / `logs` | |
-| `IPC_SOCKET_PATH` / `SOCKET_PATH` | `/tmp/mev-streamer.sock` | скрипты синхронизируют обе |
+| `IPC_SOCKET_PATH` / `SOCKET_PATH` | `/tmp/mev-streamer.sock` | the scripts keep both in sync |
 
 </details>
 
@@ -225,26 +225,26 @@ $X --probe-relays                   # релеи принимают формат
 
 <p align="center"><img src="assets/tree.svg" width="100%" alt="tree"></p>
 
-IPC — NDJSON по Unix-сокету (права 0600):
+IPC — NDJSON over a Unix socket (mode 0600):
 
 ```
 → {"mint":"…pump","ticker":"X","action":"buy","confidence":0.85,"source":"both","context":"…","timestamp":1699999999.1}
-← {"status":"ok","bundle_id":"<signature>"}     # "dry-run" в DRY_RUN
+← {"status":"ok","bundle_id":"<signature>"}     # "dry-run" in DRY_RUN
 ← {"status":"error","message":"…"}
 ```
 
-Отладка и модули по отдельности (как скрипты, не `python -m` из корня — папка `signal/` затеняет stdlib):
+Debugging and running modules on their own (as scripts, not `python -m` from the root — the `signal/` folder shadows the stdlib):
 
 ```bash
-./scripts/check.sh --network                       # + smoke с настоящим executor'ом
-$X --inspect <MINT>                                # где торгуется каждый уровень цепочки квот
+./scripts/check.sh --network                       # + smoke test with the real executor
+$X --inspect <MINT>                                # where each level of the quote chain trades
 .venv/bin/python ingestion/capture.py kick.com/name --seconds 10 --save-frame /tmp/f.png
 .venv/bin/python vision/pipeline.py screenshot.png --resize --text --engine applevision
 .venv/bin/python audio/pipeline.py --text "aping into PEPE right now"
 .venv/bin/python signal/ipc.py --mock
 ```
 
-Картинки README генерирует `scripts/readme_art.py` (нужен `pyfiglet`).
+The README artwork is generated by `scripts/readme_art.py` (needs `pyfiglet`).
 
 <p align="center"><img src="assets/divider.svg" width="100%"></p>
 
@@ -254,7 +254,7 @@ $X --inspect <MINT>                                # где торгуется �
 <p align="center"><img src="assets/can-cannot.svg" width="100%" alt="can / cannot"></p>
 
 > [!WARNING]
-> **Статус live.** Транзакции собираются по актуальному IDL, buy и полный выход сходятся с mainnet-симуляцией до лампорта, релеи принимают формат, восстановление из журнала проверено на mainnet с пустым кошельком. Реальная сделка с деньгами не проводилась, прибыльность стратегии не измерена — сначала paper, потом минимальный `BUY_SOL`.
+> **Live status.** Transactions are built from the current IDL, buy and full exit match mainnet simulation to the lamport, relays accept the format, journal restore was verified on mainnet with an empty wallet. No real-money trade has been made and strategy profitability is unmeasured — paper first, then the smallest `BUY_SOL`.
 
 > [!CAUTION]
-> Экспериментальный проект для исследований и обучения, не финансовый совет. Мемкоины крайне волатильны, многие — скам, а сигналы в стримах можно подделать специально под такие боты. Автоторговля по чужому контенту может нарушать правила площадок. Используйте только то, что готовы потерять, держите на торговом кошельке минимум и не коммитьте `.env`.
+> Experimental project for research and education, not financial advice. Memecoins are extremely volatile, many are scams, and stream signals can be faked specifically to bait bots like this one. Auto-trading on someone else's content may violate platform rules. Only use what you can afford to lose, keep the trading wallet minimal, and never commit `.env`.

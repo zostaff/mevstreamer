@@ -1,14 +1,14 @@
-"""Захват видео/аудио из live-стримов (Twitch / Kick / YouTube) для real-time анализа.
+"""Capture video/audio from live streams (Twitch / Kick / YouTube) for real-time analysis.
 
-Видео и аудио захватываются ОТДЕЛЬНЫМИ ffmpeg-процессами, каждый в своём
-worker-процессе. Результат кладётся в multiprocessing.Queue:
+Video and audio are captured by SEPARATE ffmpeg processes, each in its own
+worker process. Output goes to a multiprocessing.Queue:
 
-    video_queue: (timestamp: float, frame_bytes: bytes)   # rgb24, W*H*3 байт
+    video_queue: (timestamp: float, frame_bytes: bytes)   # rgb24, W*H*3 bytes
     audio_queue: (timestamp: float, pcm_bytes: bytes)     # s16le, 16 kHz, mono
 
-timestamp — wall-clock (time.time()) в момент, когда фрейм/чанк вычитан из ffmpeg.
+timestamp is wall-clock (time.time()) at the moment the frame/chunk is read from ffmpeg.
 
-Standalone-тест:
+Standalone test:
     python capture.py twitch.tv/username
     python capture.py "https://www.youtube.com/watch?v=..." --seconds 10 --save-frame /tmp/f.png
 """
@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 
 try:
     from .config import CaptureConfig, load_config
-except ImportError:  # запуск как скрипт: python capture.py <url>
+except ImportError:  # run as a script: python capture.py <url>
     from config import CaptureConfig, load_config
 
 log = logging.getLogger("ingestion.capture")
@@ -50,7 +50,7 @@ class ResolveError(RuntimeError):
 
 
 class _Stopped(Exception):
-    """Внутренний сигнал: получен stop_event во время долгой операции."""
+    """Internal signal: stop_event was set during a long operation."""
 
 
 def normalize_url(url: str) -> str:
@@ -70,14 +70,14 @@ def _host_matches(host: str, domains: tuple[str, ...]) -> bool:
 
 
 def _run_cmd(cmd: list[str], timeout: float, stop_event) -> str:
-    """subprocess с таймаутом, прерываемый stop_event. Возвращает stdout."""
+    """Subprocess with a timeout, interruptible by stop_event. Returns stdout."""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         text=True,
-        start_new_session=True,  # Ctrl+C из терминала не долетает напрямую
+        start_new_session=True,  # terminal Ctrl+C does not reach it directly
     )
     deadline = time.monotonic() + timeout
     try:
@@ -89,7 +89,7 @@ def _run_cmd(cmd: list[str], timeout: float, stop_event) -> str:
                 if stop_event is not None and stop_event.is_set():
                     raise _Stopped()
                 if time.monotonic() > deadline:
-                    raise ResolveError(f"{cmd[0]}: таймаут {timeout:.0f}s")
+                    raise ResolveError(f"{cmd[0]}: timeout {timeout:.0f}s")
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -106,12 +106,12 @@ def resolve_stream_url(
     timeout: float = 30.0,
     stop_event=None,
 ) -> str:
-    """Получить прямой (HLS/media) URL, который можно скормить ffmpeg.
+    """Resolve a direct (HLS/media) URL that ffmpeg can consume.
 
-    kind="audio" позволяет выбрать более лёгкий поток (Twitch audio_only,
-    YouTube bestaudio) — аудио-воркеру не нужен 1080p видеопоток.
-    Локальные файлы и неизвестные http(s) URL передаются как есть, если
-    streamlink их не знает.
+    kind="audio" selects a lighter stream (Twitch audio_only, YouTube
+    bestaudio); the audio worker does not need a 1080p video stream.
+    Local files and http(s) URLs unknown to streamlink are passed through
+    as is.
     """
     url = normalize_url(url)
     if os.path.exists(url):
@@ -121,7 +121,7 @@ def resolve_stream_url(
 
     if _host_matches(host, YOUTUBE_HOSTS):
         if not shutil.which("yt-dlp"):
-            raise ResolveError("yt-dlp не найден в PATH (brew install yt-dlp / pip install yt-dlp)")
+            raise ResolveError("yt-dlp not found in PATH (brew install yt-dlp / pip install yt-dlp)")
         fmt = "bestaudio/best" if kind == "audio" else "bestvideo[height<=?1080]/best"
         out = _run_cmd(
             ["yt-dlp", "--no-warnings", "--no-playlist", "-f", fmt, "--get-url", url],
@@ -130,8 +130,8 @@ def resolve_stream_url(
     else:
         if not shutil.which("streamlink"):
             if _host_matches(host, STREAMLINK_HOSTS):
-                raise ResolveError("streamlink не найден в PATH (pip install streamlink)")
-            return url  # прямой URL (m3u8/mp4/rtmp) — отдаём ffmpeg как есть
+                raise ResolveError("streamlink not found in PATH (pip install streamlink)")
+            return url  # direct URL (m3u8/mp4/rtmp): hand to ffmpeg as is
         quality = "audio_only,worst" if kind == "audio" else "best"
         try:
             out = _run_cmd(
@@ -141,11 +141,11 @@ def resolve_stream_url(
         except ResolveError:
             if _host_matches(host, STREAMLINK_HOSTS):
                 raise
-            return url  # streamlink не знает сайт — пробуем напрямую
+            return url  # streamlink does not know the site: try it directly
 
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
     if not lines:
-        raise ResolveError(f"пустой ответ при резолве {url}")
+        raise ResolveError(f"empty response resolving {url}")
     return lines[0]
 
 
@@ -160,7 +160,7 @@ def frame_to_image(frame_bytes: bytes, width: int, height: int):
 
 
 def pcm_to_numpy(pcm_bytes: bytes):
-    """s16le → float32 [-1, 1] (формат, который ждёт Whisper)."""
+    """s16le → float32 [-1, 1] (the format Whisper expects)."""
     import numpy as np
     return np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
@@ -195,7 +195,7 @@ class StreamCapture:
         self.config = config or load_config()
 
         self.stop_event = mp.Event()
-        # Счётчики доступны из родителя (мониторинг/тест)
+        # Counters are readable from the parent (monitoring/tests)
         self.frames_captured = mp.Value("q", 0)
         self.frames_dropped = mp.Value("q", 0)
         self.audio_chunks = mp.Value("q", 0)
@@ -203,7 +203,7 @@ class StreamCapture:
 
         self._processes: list[mp.Process] = []
 
-    # Process-объекты не пиклятся — под spawn (macOS) self передаётся в child
+    # Process objects are not picklable; under spawn (macOS) self is passed to the child
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_processes"] = []
@@ -220,9 +220,9 @@ class StreamCapture:
 
     def start(self) -> None:
         if self.is_alive():
-            raise RuntimeError(f"StreamCapture({self.name}) уже запущен")
+            raise RuntimeError(f"StreamCapture({self.name}) is already running")
         if not shutil.which("ffmpeg"):
-            raise RuntimeError("ffmpeg не найден в PATH")
+            raise RuntimeError("ffmpeg not found in PATH")
         self.stop_event.clear()
         self._processes = [
             mp.Process(target=self.video_worker, name=f"video[{self.name}]", daemon=True),
@@ -236,10 +236,10 @@ class StreamCapture:
         return any(p.is_alive() for p in self._processes)
 
     def stop(self, timeout: float = 5.0, drain: bool = True) -> None:
-        """Graceful shutdown: stop_event → воркеры убивают ffmpeg и выходят.
+        """Graceful shutdown: stop_event → workers kill ffmpeg and exit.
 
-        Пока ждём — дренируем очереди, иначе feeder-поток mp.Queue в воркере
-        может висеть на заполненном pipe и процесс не завершится.
+        Drain the queues while waiting; otherwise the worker's mp.Queue feeder
+        thread can block on a full pipe and the process never exits.
         """
         self.stop_event.set()
         deadline = time.monotonic() + timeout
@@ -251,7 +251,7 @@ class StreamCapture:
                 p.join(0.1)
         for p in self._processes:
             if p.is_alive():
-                log.warning("%s не завершился за %.0fs — terminate", p.name, timeout)
+                log.warning("%s did not exit within %.0fs, terminating", p.name, timeout)
                 p.terminate()
                 p.join(2)
             if p.is_alive():
@@ -311,15 +311,15 @@ class StreamCapture:
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
         if src.startswith(("http://", "https://")):
             cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
-                    # I/O-таймаут 10 с (µs): зависший сокет → ошибка, а не вечный read().
-                    # HLS-демуксер пробрасывает rw_timeout во вложенные запросы сегментов.
+                    # 10 s I/O timeout (µs): a hung socket errors out instead of read() blocking forever.
+                    # The HLS demuxer propagates rw_timeout to nested segment requests.
                     "-rw_timeout", "10000000"]
             if ".m3u8" in src:
-                # Стартовать с live edge, а не с начала плейлиста — иначе на
-                # старте вылетает пачка старых сегментов быстрее real-time
+                # Start at the live edge, not the playlist start; otherwise a burst of
+                # old segments arrives faster than real time on startup
                 cmd += ["-live_start_index", "-1"]
         elif os.path.exists(src):
-            cmd += ["-re"]  # локальный файл — эмулируем real-time (для тестов)
+            cmd += ["-re"]  # local file: emulate real time (for tests)
         return cmd + ["-i", src]
 
     def _worker_main(
@@ -329,7 +329,7 @@ class StreamCapture:
         chunk_size: int,
         on_chunk: Callable[[float, bytes], None],
     ) -> None:
-        # Ctrl+C обрабатывает родитель через stop_event — воркер его игнорирует
+        # The parent handles Ctrl+C via stop_event; the worker ignores it
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         _init_worker_logging()
         cfg = self.config
@@ -352,7 +352,7 @@ class StreamCapture:
             if self.stop_event.is_set():
                 break
 
-            # Долго и стабильно работали → начинаем backoff заново
+            # Ran long and stable → restart backoff from scratch
             if got_data and time.monotonic() - started >= cfg.backoff_reset_after:
                 backoff = cfg.backoff_initial
             with self.reconnects.get_lock():
@@ -371,7 +371,7 @@ class StreamCapture:
         chunk_size: int,
         on_chunk: Callable[[float, bytes], None],
     ) -> bool:
-        """Запустить ffmpeg и читать stdout блоками chunk_size. True если были данные."""
+        """Run ffmpeg and read stdout in chunk_size blocks. True if any data arrived."""
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -392,11 +392,11 @@ class StreamCapture:
         cfg = self.config
         last_data = [time.monotonic()]
         got_any = [False]
-        in_chunk = [False]  # on_chunk ждёт место в очереди — это не stall ffmpeg
+        in_chunk = [False]  # on_chunk waiting for queue space is not an ffmpeg stall
 
         def watch_stop() -> None:
-            # Разблокирует read() в главном потоке при stop() и при зависании
-            # потока (HLS stall: ffmpeg жив, но stdout молчит) → reconnect.
+            # Unblocks read() in the main thread on stop() and when the stream hangs
+            # (HLS stall: ffmpeg alive but stdout silent) → reconnect.
             while proc.poll() is None:
                 if self.stop_event.wait(0.5):
                     _kill(proc)
@@ -404,7 +404,7 @@ class StreamCapture:
                 limit = cfg.stall_timeout if got_any[0] else max(cfg.stall_timeout, cfg.startup_timeout)
                 idle = time.monotonic() - last_data[0]
                 if idle > limit and not in_chunk[0]:
-                    log.warning("[%s] нет данных %.0fs — ffmpeg завис, перезапуск", kind, idle)
+                    log.warning("[%s] no data for %.0fs, ffmpeg stalled, restarting", kind, idle)
                     stderr_tail.append(f"watchdog: stalled {idle:.0f}s")
                     _kill(proc)
                     return
@@ -415,9 +415,9 @@ class StreamCapture:
         got_data = False
         try:
             while not self.stop_event.is_set():
-                data = proc.stdout.read(chunk_size)  # блокирует до полного фрейма/чанка или EOF
+                data = proc.stdout.read(chunk_size)  # blocks until a full frame/chunk or EOF
                 if len(data) < chunk_size:
-                    break  # EOF / обрыв / kill от watchdog; неполный хвост выбрасываем
+                    break  # EOF / disconnect / watchdog kill; discard the partial tail
                 got_data = got_any[0] = True
                 in_chunk[0] = True
                 try:
@@ -433,7 +433,7 @@ class StreamCapture:
         return got_data
 
     def _put_drop_oldest(self, q, item) -> None:
-        """Video: при полной очереди выкидываем самый старый фрейм."""
+        """Video: when the queue is full, drop the oldest frame."""
         while True:
             try:
                 q.put_nowait(item)
@@ -447,7 +447,7 @@ class StreamCapture:
                     pass
 
     def _put_blocking(self, q, item) -> None:
-        """Audio: никогда не дропаем — ждём, пока downstream освободит место."""
+        """Audio: never drop; wait until downstream frees space."""
         warned = False
         while not self.stop_event.is_set():
             try:
@@ -455,7 +455,7 @@ class StreamCapture:
                 return
             except queue.Full:
                 if not warned:
-                    log.warning("[audio] queue full — downstream не успевает, ждём")
+                    log.warning("[audio] queue full, downstream lagging, waiting")
                     warned = True
         raise _Stopped()
 
@@ -478,10 +478,10 @@ def _kill(proc: subprocess.Popen) -> None:
 # ---------------------------------------------------------------------------
 
 class MultiStreamCapture:
-    """Несколько стримов параллельно.
+    """Multiple streams in parallel.
 
-    Каждый стрим изолирован: свои video/audio воркер-процессы, свои ffmpeg и
-    свои очереди — падение одного не влияет на другие.
+    Each stream is isolated: its own video/audio worker processes, ffmpeg
+    instances and queues, so one failing does not affect the others.
 
         multi = MultiStreamCapture(cfg.stream_urls, cfg)
         multi.start_all()
@@ -492,10 +492,10 @@ class MultiStreamCapture:
         self.config = config or load_config()
         urls = [normalize_url(u) for u in (stream_urls or self.config.stream_urls)]
         if not urls:
-            raise ValueError("нет URL стримов (STREAM_URL пуст)")
+            raise ValueError("no stream URLs (STREAM_URL is empty)")
         self.queues: dict[str, tuple[mp.Queue, mp.Queue]] = {}
         self.captures: dict[str, StreamCapture] = {}
-        for url in dict.fromkeys(urls):  # dedupe, порядок сохраняется
+        for url in dict.fromkeys(urls):  # dedupe, order preserved
             vq = mp.Queue(maxsize=self.config.queue_maxsize)
             aq = mp.Queue(maxsize=self.config.queue_maxsize)
             self.queues[url] = (vq, aq)
@@ -507,7 +507,7 @@ class MultiStreamCapture:
 
     def stop_all(self, timeout: float = 5.0) -> None:
         for cap in self.captures.values():
-            cap.stop_event.set()  # сигналим всем сразу, потом ждём по очереди
+            cap.stop_event.set()  # signal all at once, then wait for each in turn
         for cap in self.captures.values():
             cap.stop(timeout=timeout)
 
@@ -524,12 +524,12 @@ class MultiStreamCapture:
 # ---------------------------------------------------------------------------
 
 def _standalone_test(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Захватить N секунд стрима и показать статистику")
-    parser.add_argument("url", nargs="?", help="URL стрима (по умолчанию STREAM_URL из env)")
+    parser = argparse.ArgumentParser(description="Capture N seconds of a stream and print stats")
+    parser.add_argument("url", nargs="?", help="stream URL (default: STREAM_URL from env)")
     parser.add_argument("--seconds", type=float, default=10.0)
     parser.add_argument("--start-timeout", type=float, default=60.0,
-                        help="сколько ждать первых данных (резолв + буферизация)")
-    parser.add_argument("--save-frame", metavar="PATH", help="сохранить последний фрейм (png/jpg)")
+                        help="how long to wait for first data (resolve + buffering)")
+    parser.add_argument("--save-frame", metavar="PATH", help="save the last frame (png/jpg)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -539,7 +539,7 @@ def _standalone_test(argv: list[str] | None = None) -> int:
     cfg = load_config()
     url = args.url or cfg.stream_url
     if not url:
-        parser.error("укажи URL или STREAM_URL")
+        parser.error("specify a URL or STREAM_URL")
 
     vq: mp.Queue = mp.Queue(maxsize=cfg.queue_maxsize)
     aq: mp.Queue = mp.Queue(maxsize=cfg.queue_maxsize)
@@ -561,7 +561,7 @@ def _standalone_test(argv: list[str] | None = None) -> int:
         while True:
             now = time.monotonic()
             if t_first is None and now - t_start > args.start_timeout:
-                print(f"нет данных за {args.start_timeout:.0f}s — сдаюсь", file=sys.stderr)
+                print(f"no data within {args.start_timeout:.0f}s, giving up", file=sys.stderr)
                 break
             if t_first is not None and now - t_first >= args.seconds:
                 break
@@ -571,7 +571,7 @@ def _standalone_test(argv: list[str] | None = None) -> int:
                 got = True
                 if t_first is None:
                     t_first = time.monotonic()
-                    print(f"первый фрейм через {t_first - t_start:.1f}s")
+                    print(f"first frame after {t_first - t_start:.1f}s")
                 frames += 1
                 frame_sizes.add(len(data))
                 first_ts = first_ts or ts
@@ -588,32 +588,32 @@ def _standalone_test(argv: list[str] | None = None) -> int:
             except queue.Empty:
                 pass
             if not got and not cap.is_alive():
-                print("воркеры завершились", file=sys.stderr)
+                print("workers exited", file=sys.stderr)
                 break
     except KeyboardInterrupt:
-        print("\nCtrl+C — останавливаю")
+        print("\nCtrl+C, stopping")
     finally:
         elapsed = time.monotonic() - t_first if t_first else 0.0
         cap.stop()
 
     bytes_per_sec = cfg.audio_sample_rate * cfg.audio_sample_width * cfg.audio_channels
-    print("\n=== результат ===")
-    print(f"захвачено:        {elapsed:.1f}s")
-    print(f"video frames:     {frames}  (dropped в очереди: {cap.frames_dropped.value})")
+    print("\n=== result ===")
+    print(f"captured:         {elapsed:.1f}s")
+    print(f"video frames:     {frames}  (dropped in queue: {cap.frames_dropped.value})")
     if elapsed > 0:
         print(f"effective FPS:    {frames / elapsed:.2f}  (target {cfg.fps})")
     if frames > 1 and last_ts > first_ts:
-        # HLS приходит сегментами → фреймы прилетают пачками, это нормально
-        print(f"arrival span:     {last_ts - first_ts:.1f}s между первым и последним фреймом")
+        # HLS arrives in segments → frames come in bursts; this is expected
+        print(f"arrival span:     {last_ts - first_ts:.1f}s between first and last frame")
     sizes = ", ".join(f"{s:,}" for s in sorted(frame_sizes)) or "-"
-    print(f"frame size:       {sizes} bytes (ожидается {cfg.frame_size:,} = {cfg.width}x{cfg.height}x3)")
+    print(f"frame size:       {sizes} bytes (expected {cfg.frame_size:,} = {cfg.width}x{cfg.height}x3)")
     print(f"audio chunks:     {audio_chunks} × {cfg.audio_chunk_size:,} bytes "
-          f"= {audio_bytes / bytes_per_sec:.1f}s аудио")
+          f"= {audio_bytes / bytes_per_sec:.1f}s audio")
     print(f"reconnects:       video+audio {cap.reconnects.value}")
 
     if args.save_frame and last_frame:
         frame_to_image(last_frame, cfg.width, cfg.height).save(args.save_frame)
-        print(f"последний фрейм:  {args.save_frame}")
+        print(f"last frame:       {args.save_frame}")
 
     return 0 if frames > 0 else 1
 

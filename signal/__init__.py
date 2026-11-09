@@ -1,14 +1,14 @@
-"""Signal: агрегация vision + audio, scoring, dedup, IPC → Rust executor.
+"""Signal: vision + audio aggregation, scoring, dedup, IPC → Rust executor.
 
-Запуск:  python signal/orchestrator.py
+Run:  python signal/orchestrator.py
 
-ВНИМАНИЕ: имя папки совпадает со stdlib-модулем `signal`. Поэтому:
-  * `import signal.scorer` из корня проекта не работает (и не должен);
-    модули этой папки импортируют друг друга напрямую (`from scorer import ...`),
-    т.к. при запуске скрипта signal/ оказывается в sys.path[0].
-  * корень проекта нельзя ставить В НАЧАЛО sys.path — иначе `import signal`
-    (asyncio, ingestion/capture.py) подхватит эту папку вместо stdlib.
-    orchestrator.py добавляет корень в КОНЕЦ sys.path.
+WARNING: this folder's name collides with the stdlib `signal` module. Hence:
+  * `import signal.scorer` from the project root does not work (and must not);
+    modules in this folder import each other directly (`from scorer import ...`),
+    since running a script puts signal/ at sys.path[0].
+  * never put the project root at the START of sys.path, or `import signal`
+    (asyncio, ingestion/capture.py) picks up this folder instead of the stdlib.
+    orchestrator.py appends the root to the END of sys.path.
 """
 
 try:
@@ -17,5 +17,5 @@ try:
     from .ipc import IPC_SOCKET_PATH, ExecutorClient
     from .resolver import TokenResolver
     from .scorer import Signal, SignalScorer
-except ImportError:  # пакетный импорт недоступен (см. выше) или нет aiohttp
+except ImportError:  # package import unavailable (see above) or aiohttp missing
     pass

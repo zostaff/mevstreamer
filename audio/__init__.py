@@ -1,4 +1,4 @@
-"""Module 3: Audio / Speech Analysis — Whisper транскрипция + торговые фразы."""
+"""Module 3: Audio / Speech Analysis — Whisper transcription + trading phrases."""
 
 from .keyword_spotter import KeywordSpotter
 from .pipeline import AudioConfig, AudioPipeline, AudioResult

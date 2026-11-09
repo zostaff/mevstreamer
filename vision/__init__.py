@@ -1,4 +1,4 @@
-"""Vision: OCR видеофреймов, детекция Solana адресов/тикеров и торговых UI."""
+"""Vision: video-frame OCR, Solana address/ticker detection and trading UI recognition."""
 
 from .config import VisionConfig, load_config
 from .detector import TokenDetector, is_valid_address
