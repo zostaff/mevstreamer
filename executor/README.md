@@ -11,6 +11,8 @@ cargo build --release
 ./target/release/mev-streamer-executor                    # serve signals
 ./target/release/mev-streamer-executor --selfcheck MINT   # verify buy/sell + quotes vs mainnet simulation
 ./target/release/mev-streamer-executor --probe-relays     # relay endpoints accept the format (spends nothing)
+./target/release/mev-streamer-executor --inspect MINT     # quote chain of a curve
+./target/release/mev-streamer-executor --new-wallet FILE  # fresh hot wallet (secret → FILE, mode 600)
 ```
 
 Signal (one line):
@@ -23,9 +25,27 @@ Reply: `{"status":"ok","bundle_id":"<signature>"}` or `{"status":"error","messag
 without a key it simulates as `SIM_PAYER`, a funded system wallet), logs CU used and tokens
 received, opens a *paper* position and runs the same TP/SL/timeout logic.
 
-**Verified 2026-11-09 on mainnet:** buy quote == simulated tokens received (exact), sell quote
-== simulated lamports received (exact); buy 69.7k–73.2k CU, sell 46.2k CU; Sender, Jito
-(global + NY) and RPC accept the submission format. A funded live trade has not been run.
+**Landing & reconciliation.** A tx is "not landed" only once the block height passes its
+blockhash's `lastValidBlockHeight` (never on a wall-clock timeout); status counts at
+`confirmed`; a relay error after signing does not release the slot. Cost and proceeds are
+the payer's real lamport delta from `getTransaction`.
 
-Not supported (rejected with a clear message): non-SOL-quoted curves, cashback coins, buys
-that would cross into the synthetic migration, graduated curves.
+**Exits** on position value (fee-aware sell quote + ATA rent back) vs real cost: TP, SL,
+trailing stop (armed at 1.2×), timeout; sells the whole balance and closes the ATA; slippage
+escalates to `EXIT_SLIPPAGE_PCT` for urgent exits and retries.
+
+**Risk limits** before every buy: signal age, confidence, session loss cap, consecutive
+losses, SOL reserve, market cap, no re-buy of a traded mint.
+
+**State** in `STATE_DIR` (`logs/`): `positions.json` (atomic snapshot, reconciled with
+on-chain balances on a live start; pending buys are awaited) and `trades.jsonl` (events).
+Dry runs use `*.dry.*`. A second executor on the same socket refuses to start.
+
+**Verified 2026-11-09 on mainnet:** buy quote == simulated tokens received (exact); one
+simulated tx buy → sell all → close ATA: payer delta == quote (exact, 3 mayhem coins);
+buy 70–75k CU, sell 46k CU; Sender, Jito and RPC accept the submission format; journal
+restore + single-instance guard with an unfunded live key. A funded live trade has not been run.
+
+Not supported (rejected with a clear message): non-SOL-quoted curves (observed chains all
+end in xStocks, unreachable from SOL), cashback coins, buys that would cross into the
+synthetic migration, sells beyond the curve's real reserves, graduated curves.

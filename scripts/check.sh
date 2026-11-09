@@ -39,6 +39,9 @@ print("mint repair: candidates contain the true mint for", len(cases), "OCR misr
 PYEOF
 )
 
+step "unit checks: false-signal guards (offline)"
+(cd /tmp && "$ROOT/$PY" -I "$ROOT/scripts/unit_checks.py")
+
 step "smoke test: orchestrator → mock executor"
 LOG_LEVEL=WARNING "$PY" scripts/smoke_test.py
 

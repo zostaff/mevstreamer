@@ -13,6 +13,11 @@ use tokio::sync::mpsc;
 pub fn bind(path: &str) -> Result<UnixListener> {
     let p = Path::new(path);
     if p.exists() {
+        // A live socket means another executor is trading this wallet — two would keep
+        // separate position books (double buys, limits ignored).
+        if std::os::unix::net::UnixStream::connect(p).is_ok() {
+            return Err(format!("another executor is already listening on {path} — refusing to start a second one").into());
+        }
         std::fs::remove_file(p).map_err(|e| format!("remove stale socket {path}: {e}"))?;
         log_warn!("removed stale socket {path}");
     }

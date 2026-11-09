@@ -22,7 +22,7 @@ pub async fn run(cfg: &Config, mint: &str) -> Result<()> {
     let mint = Pubkey::from_str(mint.trim()).map_err(|e| format!("bad mint: {e}"))?;
     let rpc = Rpc::new(cfg.rpc_url.clone());
     let (global, fees) = crate::fetch_state(&rpc).await?;
-    let blockhash = rpc.refresh_blockhash().await?;
+    let blockhash = rpc.refresh_blockhash().await?.hash;
     let curve_key = pda::bonding_curve(&mint);
     let accs = rpc.get_multiple_accounts(&[curve_key, mint]).await?;
     let curve = BondingCurve::parse(&accs[0].as_ref().ok_or("bonding curve not found")?.data)?;
@@ -57,55 +57,85 @@ pub async fn run(cfg: &Config, mint: &str) -> Result<()> {
         }
     }
 
-    // ---- sell, as a real holder that is not the curve
-    let holders = rpc.recent_holders(&curve_key, &mint, 15).await?;
-    let mut tried = false;
-    for (owner, _) in holders {
-        // Only plain wallets as fee payer (system-owned), and never the curve itself.
-        if owner == curve_key {
-            continue;
-        }
-        let owner_acc = match rpc.get_multiple_accounts(&[owner]).await?.into_iter().next().flatten() {
-            Some(o) if o.owner == pda::SYSTEM_PROGRAM && o.lamports > 10_000_000 => o,
-            _ => continue,
-        };
-        let a = MintAccounts::new(mint, &owner, token_program);
-        // sell_v3 sells from the canonical ATA: use its live balance.
-        let amount = rpc.token_balance(&a.user_ata).await.unwrap_or(0);
-        if amount == 0 {
-            continue;
-        }
-        let sell_amount = (amount / 10).max(1);
-        let quote = bonding::sell_sol_out(&global, &fees, &curve, supply, sell_amount)?;
-        let ixs = tx_builder::sell_instructions(&owner, &a, &buyback, sell_amount, 1, budget, &[]);
-        let sim = rpc.simulate(&tx_builder::encode_base64(&tx_builder::unsigned(&owner, &ixs, blockhash)?)?, &[owner]).await?;
-        tried = true;
+    // ---- round trip: buy → sell everything bought → close the ATA, in ONE simulated
+    // tx as SIM_PAYER. Tests our sell quote on the exact post-buy curve (what live
+    // trading does) without depending on finding a holder through a rate-limited RPC.
+    let curve = fresh_curve(&rpc, &curve_key).await?;
+    let q = bonding::buy_exact_sol_in(&global, &fees, &curve, supply, cfg.buy_lamports)?;
+    let after = curve.after_buy(q.net_in, q.tokens_out);
+    let sell_quote = bonding::sell_sol_out(&global, &fees, &after, supply, q.tokens_out)?;
+    let a = MintAccounts::new(mint, &payer, token_program);
+    let pre = rpc.get_multiple_accounts(&[payer, a.user_volume_accumulator, a.user_ata]).await?;
+    let pre_payer = pre[0].as_ref().map(|x| x.lamports).ok_or("SIM_PAYER not found")?;
+    let pre_acc = pre[1].as_ref().map(|x| x.lamports).unwrap_or(0);
+    if pre[2].is_some() {
+        println!("EXIT skipped: SIM_PAYER already holds this token (ATA exists) — set SIM_PAYER to another funded wallet");
+    } else {
+        let mut ixs = tx_builder::buy_instructions(&payer, &a, &buyback, cfg.buy_lamports, 1, budget, &[]);
+        ixs.push(tx_builder::sell_ix(&a, &payer, &buyback, q.tokens_out, 1));
+        ixs.push(tx_builder::close_account(&token_program, &a.user_ata, &payer, &payer));
+        let sim = rpc.simulate(&tx_builder::encode_base64(&tx_builder::unsigned(&payer, &ixs, blockhash)?)?, &[payer, a.user_volume_accumulator, a.user_ata]).await?;
         match &sim.err {
             None => {
-                let post = sim.post_accounts[0].as_ref().map(|x| x.lamports).unwrap_or(0);
-                let got = (post + SIG_FEE).saturating_sub(owner_acc.lamports);
-                let m = got == quote;
+                let post_payer = sim.post_accounts[0].as_ref().map(|x| x.lamports).unwrap_or(0);
+                let post_acc = sim.post_accounts[1].as_ref().map(|x| x.lamports).unwrap_or(0);
+                let closed = sim.post_accounts[2].as_ref().map_or(true, |x| x.lamports == 0);
+                // payer: −debit + sell proceeds − base fee − volume-accumulator rent (if created).
+                let expected = pre_payer as i128 - q.debit as i128 + sell_quote as i128 - SIG_FEE as i128 - (post_acc as i128 - pre_acc as i128);
+                let got = post_payer as i128;
+                let m = got == expected && closed;
                 ok &= m;
-                println!("SELL {}: holder {}, quote {} lamports, simulated {} ({} CU)", if m { "OK " } else { "MISMATCH" },
-                    owner, quote, got, sim.units_consumed.unwrap_or(0));
+                println!(
+                    "EXIT {}: buy {} → {} tokens → sell all: quote {} lamports back, payer Δ expected {} got {} ({} CU, ATA closed: {closed})",
+                    if m { "OK " } else { "MISMATCH" }, cfg.buy_lamports, q.tokens_out, sell_quote,
+                    expected - pre_payer as i128, got - pre_payer as i128, sim.units_consumed.unwrap_or(0)
+                );
             }
             Some(e) => {
                 ok = false;
-                println!("SELL FAILED (holder {owner}): {e}");
+                println!("EXIT FAILED (buy → sell all → close): {e}");
                 sim.logs.iter().rev().take(10).rev().for_each(|l| println!("     {l}"));
             }
         }
-        break;
-    }
-    if !tried {
-        println!("SELL skipped: no holder wallet found among recent traders (rate-limited RPC?) — rerun");
     }
     if ok {
-        println!("selfcheck PASSED{}", if tried { "" } else { " (buy only)" });
+        println!("selfcheck PASSED");
         Ok(())
     } else {
         Err("selfcheck FAILED".into())
     }
+}
+
+/// `--inspect <MINT>`: walk the quote chain (B → its quote A → … → SOL/other) and
+/// print where each level trades — the information a multi-hop route needs.
+pub async fn inspect(cfg: &Config, mint: &str) -> Result<()> {
+    let rpc = Rpc::new(cfg.rpc_url.clone());
+    let mut cur = Pubkey::from_str(mint.trim()).map_err(|e| format!("bad mint: {e}"))?;
+    for depth in 0..4 {
+        let curve_key = pda::bonding_curve(&cur);
+        let accs = rpc.get_multiple_accounts(&[curve_key, cur]).await?;
+        let mint_owner = accs[1].as_ref().map(|a| a.owner.to_string()).unwrap_or_else(|| "missing".into());
+        let Some(acc) = accs[0].as_ref().filter(|a| a.owner == pda::PUMP_PROGRAM) else {
+            println!("{depth}: {cur} — no pump bonding curve (mint program {mint_owner})");
+            break;
+        };
+        let c = BondingCurve::parse(&acc.data)?;
+        println!(
+            "{depth}: {cur} curve complete={} quote={} mayhem={} cashback={} real_quote={} mint_program={mint_owner}",
+            c.complete, if c.is_sol_quoted() { "SOL".to_string() } else { c.quote_mint.to_string() },
+            c.is_mayhem_mode, c.is_cashback_coin, c.real_quote_reserves
+        );
+        if c.is_sol_quoted() {
+            break;
+        }
+        cur = c.quote_mint;
+    }
+    Ok(())
+}
+
+async fn fresh_curve(rpc: &Rpc, key: &Pubkey) -> Result<BondingCurve> {
+    let acc = rpc.get_multiple_accounts(&[*key]).await?.into_iter().next().flatten().ok_or("bonding curve not found")?;
+    BondingCurve::parse(&acc.data)
 }
 
 /// `--probe-relays`: send one tx that can never land (fresh unfunded key: compute budget
@@ -119,7 +149,7 @@ pub async fn probe_relays(cfg: &Config) -> Result<()> {
     use std::sync::Arc;
 
     let rpc = Arc::new(Rpc::new(cfg.rpc_url.clone()));
-    let blockhash = rpc.refresh_blockhash().await?;
+    let blockhash = rpc.refresh_blockhash().await?.hash;
     let jito = Arc::new(JitoClient::new(cfg.jito_urls.clone()));
     let url = sender::sender_url_for_tip(&cfg.sender_url, cfg.sender_tip_lamports);
     let sub = Arc::new(Submitter::new(cfg.relays.clone(), url.clone(), cfg.sender_tip_lamports, Arc::clone(&jito), Arc::clone(&rpc)));

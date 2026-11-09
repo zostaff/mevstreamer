@@ -114,7 +114,9 @@ class SignalScorer:
         w = self.weights
         comps: dict[str, float] = {}
         if v_mints:
-            comps["visual_mint_detected"] = w["visual_mint_detected"]
+            # вес mint'а × OCR/address confidence (восстановленный mint_repair — ≤0.9)
+            f = v.mint_factor(mint) if mint in v_mints else v.mint_factor(v_mints[0])
+            comps["visual_mint_detected"] = round(w["visual_mint_detected"] * f, 4)
         if v_tickers:
             comps["visual_ticker_detected"] = w["visual_ticker_detected"]
         if v and v.platform:
@@ -139,14 +141,22 @@ class SignalScorer:
         source: Source = "both" if v_active and a_active else ("vision" if v_active else "audio")
 
         context, details = self._describe(v, a, mint, ticker)
+        action = self._action(v, a)
+        if action == "buy" and v is not None and v.ambiguous_mints:
+            # >1 разных mint'ов на экране (чат-оверлей?) — не угадываем, какой покупать
+            action = "watch"
+            details = (*details, "ambiguous mints on screen — BUY suppressed")
+        # wire timestamp = время захвата самого свежего доказательства (фрейм или
+        # конец аудио-чанка), а не время скоринга: executor отбрасывает старые сигналы
+        evidence_ts = [o.timestamp for o in (v, a) if o is not None and o.timestamp]
         return Signal(
             mint=mint,
             ticker=ticker,
-            action=self._action(v, a),
+            action=action,
             confidence=confidence,
             source=source,
             context=context,
-            timestamp=time.time() if now is None else now,
+            timestamp=max(evidence_ts) if evidence_ts else (time.time() if now is None else now),
             components=comps,
             details=details,
         )

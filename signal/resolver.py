@@ -12,7 +12,11 @@
 
 Выбор среди одноимённых токенов (копикаты — норма для мемкоинов):
   verified → наибольшая ликвидность. Это эвристика: ticker-only резолв
-  в принципе может указать не на тот токен, который имеет в виду стример.
+  в принципе может указать не на тот токен, который имеет в виду стример,
+  поэтому оркестратор по умолчанию НЕ шлёт ticker-only BUY (ALLOW_TICKER_ONLY).
+  Принимаются только pump.fun mint'ы (адрес оканчивается на "pump") — executor
+  всё равно умеет торговать лишь pump.fun кривые; позитивный кеш — 60 с
+  (за час «победитель» среди копикатов меняется).
 """
 
 from __future__ import annotations
@@ -35,12 +39,17 @@ def _sym(symbol) -> str:
     return str(symbol or "").strip().lstrip("$").upper()
 
 
+def _is_pump_mint(mint) -> bool:
+    """pump.fun mint'ы (vanity-суффикс "pump") — единственное, что торгует executor."""
+    return isinstance(mint, str) and mint.endswith("pump")
+
+
 class TokenResolver:
     def __init__(
         self,
         helius_api_key: str | None = None,
         timeout_sec: float = 2.5,
-        cache_ttl_sec: float = 3600.0,
+        cache_ttl_sec: float = 60.0,
         negative_ttl_sec: float = 60.0,
         min_liquidity_usd: float = 0.0,
     ):
@@ -53,7 +62,6 @@ class TokenResolver:
         self._cache: dict[str, tuple[str | None, float, str]] = {}  # TICKER → (mint, ts, source)
         self._inflight: dict[str, asyncio.Future] = {}
         self._session: aiohttp.ClientSession | None = None
-        self.last_source: str | None = None
 
     async def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -75,13 +83,17 @@ class TokenResolver:
         return (mint, source) if time.time() - ts < ttl else None
 
     async def ticker_to_mint(self, ticker: str) -> str | None:
+        return (await self.resolve_ticker(ticker))[0]
+
+    async def resolve_ticker(self, ticker: str) -> tuple[str | None, str]:
+        """→ (mint | None, source). source возвращается per-call (не общий атрибут),
+        чтобы параллельные резолвы не перетирали друг другу источник."""
         ticker = ticker.strip().lstrip("$").upper()
         if not ticker:
-            return None
+            return None, "empty"
         hit = self.cached(ticker)
         if hit is not None:
-            self.last_source = f"cache:{hit[1]}"
-            return hit[0]
+            return hit[0], f"cache:{hit[1]}"
         # Параллельные запросы одного тикера — один HTTP-поход
         task = self._inflight.get(ticker)
         if task is None:
@@ -90,11 +102,10 @@ class TokenResolver:
             task.add_done_callback(lambda _t, k=ticker: self._inflight.pop(k, None))
         return await asyncio.shield(task)
 
-    async def _resolve_and_cache(self, ticker: str) -> str | None:
+    async def _resolve_and_cache(self, ticker: str) -> tuple[str | None, str]:
         mint, source = await self._resolve(ticker)
         self._cache[ticker] = (mint, time.time(), source)
-        self.last_source = source
-        return mint
+        return mint, source
 
     async def _resolve(self, ticker: str) -> tuple[str | None, str]:
         mint = await self._safe(self._jupiter, ticker)
@@ -123,9 +134,12 @@ class TokenResolver:
         async with session.get(JUP_SEARCH_URL, params={"query": ticker}) as r:
             r.raise_for_status()
             tokens = await r.json(content_type=None)
+        if not isinstance(tokens, list):  # ошибка API приходит объектом {"error": ...}
+            raise ValueError(f"unexpected Jupiter reply: {str(tokens)[:120]}")
         matches = [
-            t for t in tokens or []
-            if _sym(t.get("symbol")) == ticker
+            t for t in tokens
+            if isinstance(t, dict) and _is_pump_mint(t.get("id"))
+            and _sym(t.get("symbol")) == ticker
             and float(t.get("liquidity") or 0) >= self.min_liquidity_usd
         ]
         if not matches:
@@ -138,10 +152,16 @@ class TokenResolver:
         async with session.get(DEXSCREENER_SEARCH_URL, params={"q": ticker}) as r:
             r.raise_for_status()
             data = await r.json(content_type=None)
+        if not isinstance(data, dict):
+            raise ValueError(f"unexpected DexScreener reply: {str(data)[:120]}")
         best: tuple[float, str] | None = None
-        for pair in (data or {}).get("pairs") or []:
+        for pair in data.get("pairs") or []:
+            if not isinstance(pair, dict):
+                continue
             base = pair.get("baseToken") or {}
             if pair.get("chainId") != "solana" or _sym(base.get("symbol")) != ticker:
+                continue
+            if not _is_pump_mint(base.get("address")):
                 continue
             liq = float((pair.get("liquidity") or {}).get("usd") or 0)
             if liq >= self.min_liquidity_usd and (best is None or liq > best[0]):
@@ -169,8 +189,8 @@ if __name__ == "__main__":  # python signal/resolver.py BONK WIF
         try:
             for t in tickers:
                 t0 = time.perf_counter()
-                mint = await r.ticker_to_mint(t)
-                print(f"${t.upper():10} → {mint}  [{r.last_source}, {(time.perf_counter() - t0) * 1000:.0f}ms]")
+                mint, source = await r.resolve_ticker(t)
+                print(f"${t.upper():10} → {mint}  [{source}, {(time.perf_counter() - t0) * 1000:.0f}ms]")
         finally:
             await r.close()
 

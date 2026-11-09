@@ -209,10 +209,11 @@ class OCREngine:
         return reader
 
     def _init_applevision(self) -> None:
+        import objc
         import Quartz
         import Vision
 
-        self._quartz, self._vision = Quartz, Vision
+        self._objc, self._quartz, self._vision = objc, Quartz, Vision
         self._colorspace = Quartz.CGColorSpaceCreateDeviceRGB()
         # «fast» заметно хуже читает длинные base58-строки — берём accurate
         self._vn_level = Vision.VNRequestTextRecognitionLevelAccurate
@@ -280,7 +281,14 @@ class OCREngine:
             return self._run_applevision(img)
         return self._run_tesseract(img)
 
-    def _run_applevision(self, img: np.ndarray):
+    def _run_applevision(self, img: np.ndarray) -> list:
+        # PyObjC в to_thread-воркерах: у потока нет NSAutoreleasePool → autoreleased
+        # CGImage/VNRequest/результаты копятся (утечка ~МБ на кадр). Пул на кадр;
+        # результаты материализуем в Python-объекты внутри пула.
+        with self._objc.autorelease_pool():
+            return list(self._applevision_body(img))
+
+    def _applevision_body(self, img: np.ndarray):
         Q, V = self._quartz, self._vision
         h, w = img.shape[:2]
         data = np.ascontiguousarray(img, dtype=np.uint8).tobytes()

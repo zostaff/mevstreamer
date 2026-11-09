@@ -205,12 +205,17 @@ class UIRecognizer:
             t = b["text"].lower()
             ctx = self._nearby_text(blocks, b)
 
-            # bought / sold: тост "Success"/"Confirmed", лучше всего — на зелёном фоне
+            # bought / sold: тост "Success"/"Confirmed". Голое "confirmed"/"success"
+            # (tx-статус, чат, баннеры) — НЕ покупка: нужно явное слово действия в
+            # самом тосте (строка блока + та же строка/строка под ней), а для bought —
+            # ещё и зелёный фон. Кнопки Buy/Sell рядом (ctx) не в счёт.
             if _SUCCESS_RE.search(t):
-                green = self._is_greenish_around(frame, b["bbox"])
-                is_sell = bool(_SELL_RE.search(ctx))
-                explicit = is_sell or bool(_BUY_RE.search(ctx))
-                add("sold" if is_sell else "bought", 0.5 + 0.3 * green + 0.15 * explicit)
+                toast = self._toast_text(blocks, b)
+                if _SELL_RE.search(toast):
+                    green = self._is_greenish_around(frame, b["bbox"])
+                    add("sold", 0.65 + 0.2 * green)
+                elif _BUY_RE.search(toast) and self._is_greenish_around(frame, b["bbox"]):
+                    add("bought", 0.85)
 
             # about_to_buy / about_to_sell: окно подтверждения
             if _CONFIRM_RE.search(t):
@@ -253,6 +258,20 @@ class UIRecognizer:
         for o in blocks:
             ox1, _, ox2, _ = o["bbox"]
             if abs(bbox_cy(o) - cy) <= 3 * h and ox1 <= x2 + 300 and ox2 >= x1 - 300:
+                out.append(o["text"].lower())
+        return " ".join(out)
+
+    @staticmethod
+    def _toast_text(blocks: list[dict], b: dict) -> str:
+        """Текст самого тоста: блок + соседи на той же строке или ≤1.5 строки
+        ниже/выше, горизонтально перекрывающиеся с блоком (без кнопок в стороне)."""
+        h = max(1, bbox_height(b))
+        cy = bbox_cy(b)
+        x1, _, x2, _ = b["bbox"]
+        out = []
+        for o in blocks:
+            ox1, _, ox2, _ = o["bbox"]
+            if abs(bbox_cy(o) - cy) <= 1.5 * h and ox1 <= x2 + 10 and ox2 >= x1 - 10:
                 out.append(o["text"].lower())
         return " ".join(out)
 

@@ -86,7 +86,24 @@ pub struct SimResult {
 pub struct Rpc {
     http: reqwest::Client,
     url: String,
-    blockhash: RwLock<Option<(Hash, Instant)>>,
+    /// (hash, lastValidBlockHeight, fetched at)
+    blockhash: RwLock<Option<(Hash, u64, Instant)>>,
+}
+
+/// A blockhash plus the last block height at which a tx signed with it can land.
+#[derive(Debug, Clone, Copy)]
+pub struct Blockhash {
+    pub hash: Hash,
+    pub last_valid_height: u64,
+}
+
+/// Status of a signature as seen by `getSignatureStatuses`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigStatus {
+    pub slot: u64,
+    pub err: Option<String>,
+    /// confirmed or finalized (not just processed — a processed tx can sit on a dropped fork)
+    pub confirmed: bool,
 }
 
 impl Rpc {
@@ -100,9 +117,15 @@ impl Rpc {
 
     /// Batch account fetch (base64, processed commitment). Order matches `keys`.
     pub async fn get_multiple_accounts(&self, keys: &[Pubkey]) -> Result<Vec<Option<AccountData>>> {
+        self.get_multiple_accounts_at(keys, "processed").await
+    }
+
+    /// Batch account fetch at an explicit commitment. Use `confirmed` for anything that
+    /// decides money (balances after a trade): `processed` can be served by a lagging node.
+    pub async fn get_multiple_accounts_at(&self, keys: &[Pubkey], commitment: &str) -> Result<Vec<Option<AccountData>>> {
         let keys_str: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
         let v = self
-            .call("getMultipleAccounts", json!([keys_str, { "encoding": "base64", "commitment": "processed" }]))
+            .call("getMultipleAccounts", json!([keys_str, { "encoding": "base64", "commitment": commitment }]))
             .await?;
         let arr = v["value"].as_array().ok_or("getMultipleAccounts: missing value")?;
         if arr.len() != keys.len() {
@@ -111,28 +134,61 @@ impl Rpc {
         arr.iter().map(parse_account).collect()
     }
 
-    /// Raw token balance of a token account; 0 if the account doesn't exist.
+    /// Raw token balance of a token account; 0 if the account doesn't exist (processed).
     pub async fn token_balance(&self, token_account: &Pubkey) -> Result<u64> {
         let accs = self.get_multiple_accounts(&[*token_account]).await?;
         Ok(accs.into_iter().next().flatten().and_then(|a| a.token_amount()).unwrap_or(0))
     }
 
-    /// Cached blockhash; refetches inline if the cache is older than 30s.
-    pub async fn latest_blockhash(&self) -> Result<Hash> {
-        if let Some((h, at)) = *self.blockhash.read().unwrap() {
+    /// Token balance at `confirmed`: `None` if the account does not exist.
+    pub async fn token_balance_confirmed(&self, token_account: &Pubkey) -> Result<Option<u64>> {
+        let accs = self.get_multiple_accounts_at(&[*token_account], "confirmed").await?;
+        Ok(accs.into_iter().next().flatten().map(|a| a.token_amount().unwrap_or(0)))
+    }
+
+    /// SOL balance (lamports) at `confirmed`.
+    pub async fn balance(&self, key: &Pubkey) -> Result<u64> {
+        let v = self.call("getBalance", json!([key.to_string(), { "commitment": "confirmed" }])).await?;
+        v["value"].as_u64().ok_or_else(|| "getBalance: missing value".into())
+    }
+
+    /// Current block height (confirmed) — compared with `lastValidBlockHeight` to know
+    /// for sure that a tx can no longer land.
+    pub async fn block_height(&self) -> Result<u64> {
+        let v = self.call("getBlockHeight", json!([{ "commitment": "confirmed" }])).await?;
+        v.as_u64().ok_or_else(|| "getBlockHeight: not a number".into())
+    }
+
+    /// Fee payer's lamport change in a landed tx (post − pre): what a trade really cost
+    /// or returned, incl. fees, tips and rent. `None` until the tx is indexed.
+    pub async fn payer_delta(&self, sig: &str) -> Result<Option<i128>> {
+        let v = json_rpc(&self.http, &self.url, "getTransaction",
+            &json!([sig, { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 1 }])).await?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        let pre = v["meta"]["preBalances"][0].as_u64().ok_or("getTransaction: no preBalances")?;
+        let post = v["meta"]["postBalances"][0].as_u64().ok_or("getTransaction: no postBalances")?;
+        Ok(Some(post as i128 - pre as i128))
+    }
+
+    /// Cached blockhash; refetches inline if the cache is older than BLOCKHASH_TTL.
+    pub async fn latest_blockhash(&self) -> Result<Blockhash> {
+        if let Some((hash, last_valid_height, at)) = *self.blockhash.read().unwrap() {
             if at.elapsed() < BLOCKHASH_TTL {
-                return Ok(h);
+                return Ok(Blockhash { hash, last_valid_height });
             }
         }
         self.refresh_blockhash().await
     }
 
-    pub async fn refresh_blockhash(&self) -> Result<Hash> {
+    pub async fn refresh_blockhash(&self) -> Result<Blockhash> {
         let v = self.call("getLatestBlockhash", json!([{ "commitment": "confirmed" }])).await?;
         let s = v["value"]["blockhash"].as_str().ok_or("getLatestBlockhash: missing blockhash")?;
-        let h = Hash::from_str(s).map_err(|e| format!("bad blockhash {s}: {e}"))?;
-        *self.blockhash.write().unwrap() = Some((h, Instant::now()));
-        Ok(h)
+        let hash = Hash::from_str(s).map_err(|e| format!("bad blockhash {s}: {e}"))?;
+        let last_valid_height = v["value"]["lastValidBlockHeight"].as_u64().ok_or("getLatestBlockhash: missing lastValidBlockHeight")?;
+        *self.blockhash.write().unwrap() = Some((hash, last_valid_height, Instant::now()));
+        Ok(Blockhash { hash, last_valid_height })
     }
 
     pub fn spawn_blockhash_refresher(self: &Arc<Self>) {
@@ -185,15 +241,10 @@ impl Rpc {
         v.as_str().map(String::from).ok_or_else(|| format!("sendTransaction: unexpected result {v}").into())
     }
 
-    /// `Some((slot, err))` once the signature is seen at processed or better.
-    pub async fn signature_status(&self, sig: &str) -> Result<Option<(u64, Option<String>)>> {
+    /// `Some(status)` once the signature is seen at processed or better.
+    pub async fn signature_status(&self, sig: &str) -> Result<Option<SigStatus>> {
         let v = json_rpc(&self.http, &self.url, "getSignatureStatuses", &json!([[sig]])).await?;
-        let st = &v["value"][0];
-        if st.is_null() {
-            return Ok(None);
-        }
-        let err = st.get("err").filter(|e| !e.is_null()).map(|e| e.to_string());
-        Ok(Some((st["slot"].as_u64().unwrap_or(0), err)))
+        Ok(parse_sig_status(&v["value"][0]))
     }
 
     /// 75th percentile of non-zero recent priority fees (µ-lamports/CU) paid by txs
@@ -244,6 +295,15 @@ impl Rpc {
     }
 }
 
+fn parse_sig_status(st: &Value) -> Option<SigStatus> {
+    if st.is_null() {
+        return None;
+    }
+    let err = st.get("err").filter(|e| !e.is_null()).map(|e| e.to_string());
+    let confirmed = matches!(st["confirmationStatus"].as_str(), Some("confirmed" | "finalized"));
+    Some(SigStatus { slot: st["slot"].as_u64().unwrap_or(0), err, confirmed })
+}
+
 fn parse_account(item: &Value) -> Result<Option<AccountData>> {
     if item.is_null() {
         return Ok(None);
@@ -271,5 +331,14 @@ mod tests {
         assert_eq!(acc.owner, crate::pda::TOKEN_PROGRAM);
         assert_eq!(acc.token_amount(), Some(42));
         assert!(parse_account(&Value::Null).unwrap().is_none());
+    }
+
+    #[test]
+    fn parses_signature_status() {
+        assert_eq!(parse_sig_status(&Value::Null), None);
+        let st = parse_sig_status(&json!({"slot": 7, "err": null, "confirmationStatus": "processed"})).unwrap();
+        assert_eq!((st.slot, st.err.is_none(), st.confirmed), (7, true, false));
+        let st = parse_sig_status(&json!({"slot": 8, "err": {"InstructionError": [3, {"Custom": 6002}]}, "confirmationStatus": "confirmed"})).unwrap();
+        assert!(st.confirmed && st.err.unwrap().contains("6002"));
     }
 }

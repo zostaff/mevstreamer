@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 
@@ -16,11 +17,10 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Подсказка декодеру: Whisper заметно лучше пишет крипто-жаргон и тикеры,
-# если видит их в prompt. Короткая — длинный prompt увеличивает latency.
-DEFAULT_INITIAL_PROMPT = (
-    "Crypto stream. Aping into $PEPE, $WIF, $BONK on Solana. Sending it, full send."
-)
+# Подсказка декодеру: только нейтральная лексика. На шуме/музыке Whisper
+# «галлюцинирует» сам prompt — поэтому в нём НЕТ buy-фраз и тикеров (раньше
+# "Aping into $PEPE…" из prompt'а превращался в ложный BUY).
+DEFAULT_INITIAL_PROMPT = "Solana, pump.fun, contract address, market cap, liquidity, chart."
 
 # Типичные галлюцинации Whisper на шуме / музыке / тишине.
 _HALLUCINATIONS = {
@@ -28,6 +28,22 @@ _HALLUCINATIONS = {
     "thanks for watching!", "please subscribe", "bye", "okay", "so",
     "subtitles by the amara.org community",
 }
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def repeats_prompt(text: str, prompt: str | None, threshold: float = 0.6) -> bool:
+    """Транскрипт в основном повторяет initial_prompt (галлюцинация на шуме)."""
+    if not prompt:
+        return False
+    pw = set(_words(prompt))
+    tw = _words(text)
+    if not tw or not pw:
+        return False
+    overlap = sum(w in pw for w in tw) / len(tw)
+    return overlap >= threshold or " ".join(_words(prompt)) in " ".join(tw)
 
 
 def _resolve_device(device: str) -> str:
@@ -49,8 +65,8 @@ def _resolve_device(device: str) -> str:
 class RealtimeTranscriber:
     def __init__(
         self,
-        model_size: str = "small.en",
-        device: str = "cuda",
+        model_size: str = "base.en",
+        device: str = "auto",
         compute_type: str | None = None,
         rms_threshold: float = 0.01,
         use_silero_vad: bool = True,
@@ -159,6 +175,9 @@ class RealtimeTranscriber:
 
         text = " ".join(p for p in parts if p).strip()
         if text.lower().strip(" .!?,") in _HALLUCINATIONS:
+            text = ""
+        elif repeats_prompt(text, self.initial_prompt):
+            log.debug("drop prompt echo: %r", text)
             text = ""
 
         result.update(

@@ -52,7 +52,37 @@ pub struct Config {
     pub cu_limit_buy: u32,
     pub cu_limit_sell: u32,
     pub socket_path: String,
+
+    // ---- exits
+    /// Trailing stop: sell when value falls this far (bps of peak) below its peak,
+    /// once the peak is ≥ TRAIL_ARM_BPS of cost. 0 = off.
+    pub trailing_stop_bps: u64,
+    /// Max slippage for urgent exits (stop-loss / timeout / retries): the sell's
+    /// slippage escalates from SLIPPAGE_PCT up to this.
+    pub exit_slippage_pct: u64,
+    pub monitor_interval_ms: u64,
+
+    // ---- risk limits (checked before every buy)
+    pub min_confidence: f64,
+    /// Reject signals older than this (ms since the evidence was captured). 0 = off.
+    pub max_signal_age_ms: u64,
+    /// Stop buying once realized session loss reaches this. 0 = off.
+    pub max_session_loss_lamports: u64,
+    /// Stop buying after this many losing trades in a row. 0 = off.
+    pub max_consecutive_losses: u32,
+    /// SOL that must stay in the wallet after a buy (exit fees, ATA rent). Live only.
+    pub min_sol_reserve_lamports: u64,
+    /// Skip curves whose market cap (in SOL) is already above this. 0 = off.
+    pub max_mcap_lamports: u64,
+    /// Allow buying a mint again after its position closed this session.
+    pub rebuy: bool,
+    /// Directory for positions*.json / trades*.jsonl.
+    pub state_dir: String,
 }
+
+/// The trailing stop arms once value ≥ 1.2× cost, so noise right after entry
+/// doesn't stop us out (the hard STOP_LOSS covers that).
+pub const TRAIL_ARM_BPS: u64 = 12_000;
 
 impl Config {
     pub fn from_env() -> Result<Self> {
@@ -71,7 +101,7 @@ impl Config {
             stop_loss_bps: parse_fixed(&optional("STOP_LOSS", "0.5"), 4).map_err(|e| format!("STOP_LOSS: {e}"))?,
             timeout_sec: optional("TIMEOUT_SEC", "120").parse().map_err(|e| format!("TIMEOUT_SEC: {e}"))?,
             max_positions: optional("MAX_POSITIONS", "3").parse().map_err(|e| format!("MAX_POSITIONS: {e}"))?,
-            slippage_pct: optional("SLIPPAGE_PCT", "5").parse().map_err(|e| format!("SLIPPAGE_PCT: {e}"))?,
+            slippage_pct: optional("SLIPPAGE_PCT", "15").parse().map_err(|e| format!("SLIPPAGE_PCT: {e}"))?,
             dry_run: parse_bool(&optional("DRY_RUN", "true")).map_err(|e| format!("DRY_RUN: {e}"))?,
             jito_urls: optional("JITO_URLS", &optional("JITO_URL", crate::jito::DEFAULT_BLOCK_ENGINE_URL))
                 .split(',').map(crate::jito::base_url).filter(|u| !u.is_empty()).collect(),
@@ -88,6 +118,23 @@ impl Config {
             cu_limit_buy: optional("CU_LIMIT_BUY", &DEFAULT_CU_LIMIT_BUY.to_string()).parse().map_err(|e| format!("CU_LIMIT_BUY: {e}"))?,
             cu_limit_sell: optional("CU_LIMIT_SELL", &DEFAULT_CU_LIMIT_SELL.to_string()).parse().map_err(|e| format!("CU_LIMIT_SELL: {e}"))?,
             socket_path: optional("SOCKET_PATH", DEFAULT_SOCKET_PATH),
+            trailing_stop_bps: parse_fixed(&optional("TRAILING_STOP", "0.25"), 4).map_err(|e| format!("TRAILING_STOP: {e}"))?,
+            exit_slippage_pct: optional("EXIT_SLIPPAGE_PCT", "40").parse().map_err(|e| format!("EXIT_SLIPPAGE_PCT: {e}"))?,
+            monitor_interval_ms: optional("MONITOR_INTERVAL_MS", "400").parse().map_err(|e| format!("MONITOR_INTERVAL_MS: {e}"))?,
+            min_confidence: optional("MIN_CONFIDENCE", "0").parse().map_err(|e| format!("MIN_CONFIDENCE: {e}"))?,
+            max_signal_age_ms: optional("MAX_SIGNAL_AGE_MS", "6000").parse().map_err(|e| format!("MAX_SIGNAL_AGE_MS: {e}"))?,
+            max_session_loss_lamports: 0, // set below (default depends on BUY_SOL)
+            max_consecutive_losses: optional("MAX_CONSECUTIVE_LOSSES", "5").parse().map_err(|e| format!("MAX_CONSECUTIVE_LOSSES: {e}"))?,
+            min_sol_reserve_lamports: parse_fixed(&optional("MIN_SOL_RESERVE", "0.01"), 9).map_err(|e| format!("MIN_SOL_RESERVE: {e}"))?,
+            max_mcap_lamports: parse_fixed(&optional("MAX_MCAP_SOL", "0"), 9).map_err(|e| format!("MAX_MCAP_SOL: {e}"))?,
+            rebuy: parse_bool(&optional("REBUY", "false")).map_err(|e| format!("REBUY: {e}"))?,
+            state_dir: optional("STATE_DIR", "logs"),
+        };
+        let mut cfg = cfg;
+        // Default loss cap: 3 positions' worth. Explicit 0 disables it.
+        cfg.max_session_loss_lamports = match env::var("MAX_SESSION_LOSS").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+            Some(v) => parse_fixed(&v, 9).map_err(|e| format!("MAX_SESSION_LOSS: {e}"))?,
+            None => cfg.buy_lamports.saturating_mul(3),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -117,6 +164,19 @@ impl Config {
         }
         if !(10_000..=1_400_000).contains(&self.cu_limit_buy) || !(10_000..=1_400_000).contains(&self.cu_limit_sell) {
             return Err("CU_LIMIT_BUY / CU_LIMIT_SELL must be within 10000..=1400000".into());
+        }
+        if self.trailing_stop_bps >= 10_000 {
+            return Err("TRAILING_STOP must be < 1.0 (fraction below the peak), 0 = off".into());
+        }
+        if self.exit_slippage_pct >= 100 || self.exit_slippage_pct < self.slippage_pct {
+            return Err("EXIT_SLIPPAGE_PCT must be in [SLIPPAGE_PCT, 100)".into());
+        }
+        if !(100..=10_000).contains(&self.monitor_interval_ms) {
+            return Err("MONITOR_INTERVAL_MS must be within 100..=10000".into());
+        }
+        // Helius Sender rejects txs without a compute-unit price.
+        if self.relays.contains(&crate::sender::Relay::Sender) && self.priority_fee == Auto::Fixed(0) {
+            return Err("PRIORITY_FEE=0 is rejected by Helius Sender (needs a compute-unit price)".into());
         }
         if !self.dry_run && self.wallet_private_key.is_none() {
             return Err("WALLET_PRIVATE_KEY is required when DRY_RUN=false".into());
@@ -156,6 +216,17 @@ impl Config {
             cu_limit_buy: DEFAULT_CU_LIMIT_BUY,
             cu_limit_sell: DEFAULT_CU_LIMIT_SELL,
             socket_path: String::new(),
+            trailing_stop_bps: 2_500,
+            exit_slippage_pct: 40,
+            monitor_interval_ms: 400,
+            min_confidence: 0.0,
+            max_signal_age_ms: 0,
+            max_session_loss_lamports: 0,
+            max_consecutive_losses: 0,
+            min_sol_reserve_lamports: 0,
+            max_mcap_lamports: 0,
+            rebuy: false,
+            state_dir: String::new(),
         }
     }
 }

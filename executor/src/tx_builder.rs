@@ -147,6 +147,20 @@ pub fn buy_instructions(
     with_budget_and_tips(user, budget, trade, tips)
 }
 
+/// SPL Token / Token-2022 `CloseAccount` (index 9): rent goes back to `dest`.
+/// Only valid on an empty account — use it after selling the whole balance.
+pub fn close_account(token_program: &Pubkey, account: &Pubkey, dest: &Pubkey, owner: &Pubkey) -> Instruction {
+    Instruction {
+        program_id: *token_program,
+        accounts: vec![AccountMeta::new(*account, false), AccountMeta::new(*dest, false), AccountMeta::new_readonly(*owner, true)],
+        data: vec![9],
+    }
+}
+
+/// Compute budget + sell + (optionally) close the now-empty token ATA + tips.
+/// Closing reclaims ~0.002 SOL of rent per trade — pass `close_ata` only when
+/// `token_amount` is the account's full balance, otherwise the close fails the tx.
+#[allow(clippy::too_many_arguments)]
 pub fn sell_instructions(
     user: &Pubkey,
     accounts: &MintAccounts,
@@ -155,8 +169,13 @@ pub fn sell_instructions(
     min_sol_out: u64,
     budget: Budget,
     tips: &[(Pubkey, u64)],
+    close_ata: bool,
 ) -> Vec<Instruction> {
-    with_budget_and_tips(user, budget, vec![sell_ix(accounts, user, buyback, token_amount, min_sol_out)], tips)
+    let mut trade = vec![sell_ix(accounts, user, buyback, token_amount, min_sol_out)];
+    if close_ata {
+        trade.push(close_account(&accounts.token_program, &accounts.user_ata, user, user));
+    }
+    with_budget_and_tips(user, budget, trade, tips)
 }
 
 /// Priority fee in lamports for a budget: ceil(price × limit / 10⁶).
@@ -220,7 +239,11 @@ mod tests {
         assert!(bytes.len() <= 1232, "tx too large: {}", bytes.len());
         let u = unsigned(&user, &ixs, Hash::new_unique()).unwrap();
         assert_eq!(u.signatures.len(), 1);
-        assert_eq!(sell_instructions(&user, &a, &Pubkey::new_unique(), 5, 1, B, &tips[..1]).len(), 4);
+        assert_eq!(sell_instructions(&user, &a, &Pubkey::new_unique(), 5, 1, B, &tips[..1], false).len(), 4);
+        let close = sell_instructions(&user, &a, &Pubkey::new_unique(), 5, 1, B, &tips, true);
+        assert_eq!(close.len(), 6);
+        assert_eq!((close[3].program_id, close[3].data.clone()), (pda::TOKEN_PROGRAM, vec![9]));
+        assert!(bincode::serialize(&sign(&kp, &close, Hash::new_unique()).unwrap()).unwrap().len() <= 1232);
         assert_eq!(priority_fee_lamports(B), 9_000);
     }
 }

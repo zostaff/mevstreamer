@@ -135,6 +135,9 @@ class OrchestratorConfig:
     display_min_confidence: float = 0.3
     vision_window_sec: float = 3.0
     audio_window_sec: float = 10.0
+    # ticker-only сигнал (mint'а на экране нет) → резолв по тикеру легко попадает
+    # в копикат/старый токен. По умолчанию такие BUY/SELL только логируются.
+    allow_ticker_only: bool = False
     extra: dict = field(default_factory=dict)
 
     @property
@@ -165,6 +168,7 @@ class OrchestratorConfig:
             dry_run=args.dry_run or _env_bool("DRY_RUN", True),
             monitor_only=args.monitor_only,
             ipc_socket_path=os.getenv("IPC_SOCKET_PATH", IPC_SOCKET_PATH),
+            allow_ticker_only=_env_bool("ALLOW_TICKER_ONLY", False),
         )
 
 
@@ -188,6 +192,10 @@ class SessionStats:
     sent: int = 0
     rejected: int = 0
     send_failed: int = 0
+    send_unknown: int = 0
+    ticker_only_blocked: int = 0
+    audio_stale_skipped: int = 0
+    capture_restarts: int = 0
     pipeline_errors: int = 0
     latency: dict = field(default_factory=lambda: defaultdict(list))
 
@@ -216,8 +224,13 @@ class SessionStats:
             f"  Above threshold:           {self.above_threshold}  (deduped: {self.deduped}, unresolved: {self.unresolved})",
             f"  Would execute (dry-run):   {self.would_execute}",
             f"  Signals sent to executor:  {self.sent}"
-            + (f"  (rejected: {self.rejected}, failed: {self.send_failed})" if self.rejected or self.send_failed else ""),
+            + (f"  (rejected: {self.rejected}, failed: {self.send_failed}, unknown: {self.send_unknown})"
+               if self.rejected or self.send_failed or self.send_unknown else ""),
         ]
+        if self.ticker_only_blocked:
+            lines.append(f"  Ticker-only (not sent):    {self.ticker_only_blocked}")
+        if self.audio_stale_skipped or self.capture_restarts:
+            lines.append(f"  Stale audio skipped:       {self.audio_stale_skipped}   capture restarts: {self.capture_restarts}")
         if self.pipeline_errors:
             lines.append(f"  Pipeline errors:           {self.pipeline_errors}")
         if self.latency:
@@ -259,6 +272,9 @@ class Orchestrator:
     PRINT_REPEAT_SEC = 10.0      # повторить вывод неизменного сигнала не чаще
     PRINT_CONF_DELTA = 0.05      # ...или при изменении confidence на столько
     STATUS_INTERVAL_SEC = 30.0
+    CAPTURE_CHECK_SEC = 2.0
+    CAPTURE_MAX_RESTARTS = 5         # подряд, без периода стабильной работы
+    CAPTURE_STABLE_SEC = 300.0       # столько проработал → счётчик рестартов сброшен
 
     def __init__(self, config: OrchestratorConfig, pipelines=None):
         StreamCapture, VisionPipeline, AudioPipeline = pipelines or _load_pipelines()
@@ -272,7 +288,8 @@ class Orchestrator:
         # VisionPipeline(None) → VisionConfig.from_env(), AudioPipeline(None) → AudioConfig.from_env()
         self.vision = VisionPipeline(None)
         self.audio_pipeline = AudioPipeline(None)
-        self.aggregator = SignalAggregator(config.vision_window_sec, config.audio_window_sec)
+        self.aggregator = SignalAggregator(config.vision_window_sec, config.audio_window_sec,
+                                           audio_chunk_sec=float(config.capture.audio_chunk_sec))
         self.scorer = SignalScorer()
         self.dedup = SignalDedup(cooldown_sec=config.signal_cooldown_sec)
         self.resolver = TokenResolver(config.helius_api_key)
@@ -286,6 +303,9 @@ class Orchestrator:
         self._dispatch_tasks: set[asyncio.Task] = set()
         self._last_printed: dict[tuple, tuple[float, float]] = {}  # key → (confidence, ts)
         self._last_error_log = 0.0
+        self._last_lag_warn = 0.0
+        self._last_ticker_only_log: dict[str, float] = {}
+        self.exit_code = 0
 
     # ---------------------------------------------------------------- run
 
@@ -307,12 +327,14 @@ class Orchestrator:
             asyncio.create_task(self._video_loop(), name="video"),
             asyncio.create_task(self._audio_loop(), name="audio"),
             asyncio.create_task(self._housekeeping(), name="housekeeping"),
+            asyncio.create_task(self._capture_watchdog(), name="capture-watchdog"),
         ]
         try:
             stop_waiter = asyncio.create_task(self._stop.wait())
             done, _ = await asyncio.wait([stop_waiter, *tasks], return_when=asyncio.FIRST_COMPLETED)
             for t in done:
                 if t is not stop_waiter and t.exception():
+                    self.exit_code = self.exit_code or 1
                     log.error("task %s crashed", t.get_name(), exc_info=t.exception())
             stop_waiter.cancel()
         finally:
@@ -343,17 +365,34 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- loops
 
-    def _get_latest(self, q) -> tuple | None:
-        """Самый свежий фрейм; устаревшие выбрасываем — латентность важнее полноты."""
-        item = None
+    @staticmethod
+    def _get_latest(q, timeout: float = 0.1) -> tuple[tuple | None, int]:
+        """(самый свежий фрейм, сколько устаревших выброшено). Выполняется в
+        to_thread: unpickle 2.7 МБ фрейма не должен блокировать event loop."""
+        try:
+            item = q.get(timeout=timeout)
+        except queue.Empty:
+            return None, 0
+        skipped = 0
         while True:
             try:
-                item_new = q.get_nowait()
+                item = q.get_nowait()
+                skipped += 1
             except queue.Empty:
-                return item
-            if item is not None:
-                self.stats.frames_skipped += 1
-            item = item_new
+                return item, skipped
+
+    @staticmethod
+    def _get_one(q, timeout: float = 0.1):
+        try:
+            return q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def _post_error(self, kind: str) -> None:
+        """Ошибка пост-обработки (normalize/aggregate/score): логируем с traceback
+        и продолжаем — иначе упавший цикл через FIRST_COMPLETED гасит всю сессию."""
+        self.stats.pipeline_errors += 1
+        log.exception("%s post-processing error — item skipped", kind)
 
     def _pipeline_error(self, kind: str) -> None:
         self.stats.pipeline_errors += 1
@@ -364,9 +403,9 @@ class Orchestrator:
 
     async def _video_loop(self) -> None:
         while True:
-            item = self._get_latest(self.video_queue)
+            item, skipped = await asyncio.to_thread(self._get_latest, self.video_queue)
+            self.stats.frames_skipped += skipped
             if item is None:
-                await asyncio.sleep(0.01)
                 continue
             ts, frame = item
             self.stats.frames += 1
@@ -379,21 +418,33 @@ class Orchestrator:
                 continue
             ms = (time.perf_counter() - t0) * 1000
             self.stats.lat("vision", ms)
-            obs = normalize_vision(raw, ts)
-            if obs is not None:
-                log.debug("vision %.0fms: mints=%s tickers=%s platform=%s action=%s",
-                          ms, [short_mint(m) for m in obs.mints], obs.tickers, obs.platform, obs.action)
-                self.aggregator.add_vision(obs)
-                self._evaluate(ts, {"vision": ms})
+            try:
+                obs = normalize_vision(raw, ts)
+                if obs is not None:
+                    log.debug("vision %.0fms: mints=%s tickers=%s platform=%s action=%s",
+                              ms, [short_mint(m) for m in obs.mints], obs.tickers, obs.platform, obs.action)
+                    self.aggregator.add_vision(obs)
+                    self._evaluate(ts, {"vision": ms})
+            except Exception:
+                self._post_error("vision")
 
     async def _audio_loop(self) -> None:
         while True:
-            try:
-                ts, pcm = self.audio_queue.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.02)
+            item = await asyncio.to_thread(self._get_one, self.audio_queue)
+            if item is None:
                 continue
+            ts, pcm = item
             self.stats.audio_chunks += 1
+            # Whisper отстаёт: чанк старше audio-окна агрегатор всё равно сразу
+            # выбросит — не тратим на него Whisper, догоняем live edge
+            backlog = time.time() - ts
+            if backlog > self.config.audio_window_sec:
+                self.stats.audio_stale_skipped += 1
+                self._warn_lag(backlog, skipped=True)
+                reset = getattr(self.audio_pipeline, "reset", None)
+                if callable(reset):
+                    reset()  # контекст прошлого чанка уже не соседний
+                continue
             t0 = time.perf_counter()
             try:
                 raw = await asyncio.to_thread(
@@ -405,12 +456,61 @@ class Orchestrator:
             self.stats.lat("audio", ms)
             backlog = time.time() - ts
             if backlog > 3 * self.config.capture.audio_chunk_sec:
-                log.warning("audio отстаёт на %.1fs — Whisper не успевает (модель/устройство?)", backlog)
-            obs = normalize_audio(raw, ts)
-            if obs is not None:
-                log.debug('audio %.0fms: "%s" buy=%s tickers=%s', ms, obs.transcript[-80:], obs.buy_phrase, obs.tickers)
-                self.aggregator.add_audio(obs)
-                self._evaluate(ts, {"audio": ms})
+                self._warn_lag(backlog)
+            try:
+                obs = normalize_audio(raw, ts)
+                if obs is not None:
+                    log.debug('audio %.0fms: "%s" buy=%s tickers=%s', ms, obs.transcript[-80:], obs.buy_phrase, obs.tickers)
+                    self.aggregator.add_audio(obs)
+                    self._evaluate(ts, {"audio": ms})
+            except Exception:
+                self._post_error("audio")
+
+    def _warn_lag(self, backlog: float, skipped: bool = False) -> None:
+        now = time.monotonic()
+        if now - self._last_lag_warn < 10.0:
+            return
+        self._last_lag_warn = now
+        log.warning("audio отстаёт на %.1fs — Whisper не успевает (модель/устройство?)%s", backlog,
+                    f"; устаревшие чанки пропускаются (всего {self.stats.audio_stale_skipped})" if skipped else "")
+
+    def _capture_dead(self) -> bool:
+        procs = getattr(self.capture, "_processes", None)
+        if procs:  # один из двух воркеров умер — тоже авария
+            return any(not p.is_alive() for p in procs)
+        return not self.capture.is_alive()
+
+    async def _capture_watchdog(self) -> None:
+        """Воркеры захвата умерли (OOM/segfault/…) → перезапуск с backoff;
+        не поднимаются CAPTURE_MAX_RESTARTS раз подряд → выход с кодом 3."""
+        failures = 0
+        backoff = 2.0
+        last_restart = time.monotonic()
+        while True:
+            await asyncio.sleep(self.CAPTURE_CHECK_SEC)
+            if self._stop.is_set():
+                return
+            if time.monotonic() - last_restart > self.CAPTURE_STABLE_SEC:
+                failures, backoff = 0, 2.0
+            if not self._capture_dead():
+                continue
+            failures += 1
+            if failures > self.CAPTURE_MAX_RESTARTS:
+                log.error(red("capture workers keep dying (%d restarts) — exiting"), self.CAPTURE_MAX_RESTARTS)
+                self.exit_code = 3
+                self._stop.set()
+                return
+            log.error("capture workers died — restart %d/%d in %.0fs",
+                      failures, self.CAPTURE_MAX_RESTARTS, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+            try:
+                await asyncio.to_thread(self.capture.stop)
+                self.capture.start()
+                self.stats.capture_restarts += 1
+            except Exception:
+                log.exception("capture restart failed")
+            last_restart = time.monotonic()
 
     async def _housekeeping(self) -> None:
         while True:
@@ -437,7 +537,19 @@ class Orchestrator:
             return
         sig = replace(sig, capture_ts=capture_ts)
         actionable = sig.confidence >= self.threshold and sig.action in ("buy", "sell")
+        ticker_only = actionable and not sig.mint and not self.config.allow_ticker_only
+        if ticker_only:
+            actionable = False
         self._maybe_print(sig, {**step_ms, "score": score_ms}, actionable)
+        if ticker_only:
+            self.stats.ticker_only_blocked += 1
+            key = f"{sig.action}:{sig.ticker}"
+            now = time.monotonic()
+            if now - self._last_ticker_only_log.get(key, -1e9) > 30:
+                self._last_ticker_only_log[key] = now
+                log.warning("ticker-only %s $%s conf=%.2f — mint на экране нет, не отправляется "
+                            "(ALLOW_TICKER_ONLY=false)", sig.action.upper(), sig.ticker, sig.confidence)
+            return
 
         if self.monitor_only or not actionable:
             return
@@ -453,14 +565,14 @@ class Orchestrator:
         try:
             if not sig.mint and sig.ticker:
                 t0 = time.perf_counter()
-                mint = await self.resolver.ticker_to_mint(sig.ticker)
+                mint, source = await self.resolver.resolve_ticker(sig.ticker)
                 ms = (time.perf_counter() - t0) * 1000
                 self.stats.lat("resolve", ms)
                 if not mint:
                     self.stats.unresolved += 1
                     log.warning("$%s → mint не найден (%.0fms) — сигнал пропущен", sig.ticker, ms)
                     return
-                log.info("resolved $%s → %s via %s (%.0fms)", sig.ticker, short_mint(mint), self.resolver.last_source, ms)
+                log.info("resolved $%s → %s via %s (%.0fms)", sig.ticker, short_mint(mint), source, ms)
                 sig = replace(sig, mint=mint, context=f"{sig.context} + resolved ${sig.ticker}")
                 if self.dedup.is_duplicate(sig):  # этот mint уже отправляли
                     self.stats.deduped += 1
@@ -478,6 +590,11 @@ class Orchestrator:
             e2e = (time.time() - sig.capture_ts) * 1000 if sig.capture_ts else 0.0
             if resp is None:
                 self.stats.send_failed += 1
+                return
+            if resp.status == "unknown":
+                self.stats.send_unknown += 1
+                log.warning("executor reply timeout for %s %s — status unknown (executor may still execute)",
+                            sig.action.upper(), short_mint(sig.mint))
                 return
             self.stats.lat("ipc", resp.latency_ms)
             self.stats.lat("e2e", e2e)
@@ -567,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         asyncio.run(orch.run())
     except KeyboardInterrupt:
         pass
-    return 0
+    return orch.exit_code
 
 
 if __name__ == "__main__":

@@ -77,6 +77,11 @@ class CaptureConfig:
 
     resolve_timeout: float = 30.0
 
+    # Watchdog: ffmpeg без данных дольше этого → kill → обычный reconnect.
+    # До первого чанка даём больше (буферизация HLS на старте).
+    stall_timeout: float = 15.0
+    startup_timeout: float = 45.0
+
     @property
     def resolution(self) -> str:
         return f"{self.width}:{self.height}"
@@ -108,6 +113,7 @@ class CaptureConfig:
             audio_chunk_sec=_get_int("STREAM_AUDIO_CHUNK_SEC", 3),
             width=width,
             height=height,
+            stall_timeout=float(_get_int("CAPTURE_STALL_TIMEOUT_SEC", 15)),
         )
 
 

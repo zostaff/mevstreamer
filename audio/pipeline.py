@@ -59,8 +59,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 @dataclass(frozen=True)
 class AudioConfig:
-    whisper_model: str = "small.en"
-    whisper_device: str = "cuda"          # cuda недоступна → автоматически cpu
+    whisper_model: str = "base.en"
+    whisper_device: str = "auto"          # auto: cuda, если доступна, иначе cpu
     whisper_compute_type: str | None = None
     vad_rms_threshold: float = 0.01
     use_silero_vad: bool = True
@@ -73,8 +73,8 @@ class AudioConfig:
             load_dotenv(_PROJECT_ROOT / ".env", override=False)
             load_dotenv(override=False)
         return cls(
-            whisper_model=os.getenv("WHISPER_MODEL", "small.en").strip() or "small.en",
-            whisper_device=os.getenv("WHISPER_DEVICE", "cuda").strip() or "cuda",
+            whisper_model=os.getenv("WHISPER_MODEL", "base.en").strip() or "base.en",
+            whisper_device=os.getenv("WHISPER_DEVICE", "auto").strip() or "auto",
             whisper_compute_type=os.getenv("WHISPER_COMPUTE_TYPE", "").strip() or None,
             vad_rms_threshold=_env_float("AUDIO_VAD_RMS", 0.01),
             use_silero_vad=_env_bool("AUDIO_SILERO_VAD", True),

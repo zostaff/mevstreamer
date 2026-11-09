@@ -19,13 +19,38 @@ CONF_FUZZY_1 = 0.7
 CONF_FUZZY_2 = 0.5
 _CONF_BY_DIST = {0: CONF_EXACT, 1: CONF_FUZZY_1, 2: CONF_FUZZY_2}
 
-# Перед фразой стоит отрицание → не сигнал ("i'm not buying this", "don't sell")
-_NEGATIONS = {"not", "dont", "never", "wont", "cant", "isnt", "aint", "didnt", "wouldnt", "shouldnt"}
+# Отрицание в ≤5 токенах перед фразой → не сигнал ("i'm not buying this",
+# "i would never be aping into that", "don't sell")
+_NEGATIONS = {"not", "dont", "never", "wont", "cant", "isnt", "aint", "didnt", "wouldnt", "shouldnt",
+              "no", "nobody", "stop"}
+_NEGATION_WINDOW = 5
+# "not gonna lie, aping in" — не отрицание
+_NOT_NEGATION_AFTER = (("gonna", "lie"), ("going", "to", "lie"), ("to", "lie"), ("lie",))
+
+
+def _is_negation(norms: list[str], k: int) -> bool:
+    if norms[k] not in _NEGATIONS:
+        return False
+    return not any(tuple(norms[k + 1:k + 1 + len(p)]) == p for p in _NOT_NEGATION_AFTER)
+
+# Негативный контекст в том же высказывании гасит BUY ("everyone is aping into
+# this rug", "stay away, honeypot"). Однословные — по токенам, многословные — по фразе.
+_NEGATIVE_WORDS = {"rug", "rugged", "rugging", "rugpull", "scam", "scammer", "scammed", "honeypot", "avoid"}
+_NEGATIVE_PHRASES = ("stay away", "dont buy", "do not buy", "not buying", "rug pull")
+
+# Однозначные фразы (кроме них — только exact). Fuzzy допускается лишь у
+# длинных специфичных фраз, где опечатка Whisper не превращает её в бытовую речь
+# ("going on" ≈ "going in", "getting it" ≈ "getting in" — поэтому они exact-only).
+_FUZZY_OK = {
+    "buying this", "aping in", "aping into", "sniping this", "buying right now",
+    "just bought", "im buying", "market buy", "taking profit", "taking profits",
+    "selling now", "cutting losses",
+}
 
 # Фразы без объекта: слово после них — не тикер ("let's go guys", "yolo bro")
 _NO_OBJECT_PHRASES = {
-    "lets go", "im in", "full send", "yolo", "interesting", "what do you think",
-    "this looks good", "could be big", "im out", "exit",
+    "interesting", "what do you think", "this looks good", "could be big", "im out",
+    "sold it", "selling it", "dumping it",
 }
 
 # Глаголы, после которых обычно идёт тикер ("buying [TICKER]"), даже вне фраз
@@ -150,6 +175,8 @@ def edit_distance(a: str, b: str, limit: int) -> int:
 
 
 def _max_edits(phrase: str) -> int:
+    if phrase not in _FUZZY_OK:
+        return 0                       # короткие/неоднозначные — только точно
     if " " not in phrase:
         return 0                       # однословные — только точно
     n = len(phrase.replace(" ", ""))
@@ -161,13 +188,14 @@ def _max_edits(phrase: str) -> int:
 
 
 class KeywordSpotter:
+    # Без "let's go" / "i'm in" / "yolo" / "full send": на стримах это обычная
+    # болтовня, а не покупка. Короткие ("going in", "getting in") — exact-only.
     BUY_PHRASES = [
         "buying this", "aping in", "aping into", "ape this", "ape into",
-        "sending it", "going in", "buying right now",
-        "let's go", "entry here", "i'm in", "im in",
+        "sending it", "going in", "buying right now", "just bought",
+        "i'm buying", "entry here",
         "sniping this", "market buy", "buying some",
-        "getting in", "let me buy", "gonna buy",
-        "full send", "yolo", "size in",
+        "getting in", "let me buy", "gonna buy", "size in",
     ]
 
     WATCH_PHRASES = [
@@ -177,10 +205,12 @@ class KeywordSpotter:
         "what do you think", "should i buy",
     ]
 
+    # Только явные многословные фразы про СВОЮ продажу. "closing", "exit",
+    # "get out", голые "sold"/"selling" — бытовая речь ("sold out", "get out of here").
     SELL_PHRASES = [
-        "selling", "taking profit", "i'm out", "im out",
-        "dump it", "cutting losses", "sold", "closing",
-        "get out", "exit", "take profits",
+        "sold it", "i sold", "just sold", "selling now", "selling it",
+        "selling this", "taking profit", "taking profits", "take profits",
+        "i'm out", "cutting losses", "dumping it", "selling my bag",
     ]
 
     def __init__(self):
@@ -204,6 +234,9 @@ class KeywordSpotter:
 
     def _find_matches(self, tokens: list[Token], boundary: int = 0) -> list[_Match]:
         norms = [t.norm for t in tokens]
+        joined = " " + " ".join(norms) + " "
+        negative_ctx = any(n in _NEGATIVE_WORDS for n in norms) or any(
+            f" {p} " in joined for p in _NEGATIVE_PHRASES)
         candidates: list[_Match] = []
         for kind, phrase, n, max_ed in self._phrases:
             # окна n-1..n+1 токенов: Whisper может склеить/разбить слово
@@ -223,7 +256,10 @@ class KeywordSpotter:
         for m in candidates:
             if any(m.start < t.end and t.start < m.end for t in taken):
                 continue
-            if any(norms[k] in _NEGATIONS for k in range(max(0, m.start - 2), m.start)):
+            if any(_is_negation(norms, k)
+                   for k in range(max(0, m.start - _NEGATION_WINDOW), m.start)):
+                continue
+            if m.type == "buy" and negative_ctx:
                 continue
             taken.append(m)
         taken.sort(key=lambda m: m.start)

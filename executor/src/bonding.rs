@@ -127,6 +127,14 @@ impl BondingCurve {
         p.min(u64::MAX as u128) as u64
     }
 
+    /// Fully diluted market cap in quote lamports: spot price × supply.
+    pub fn market_cap(&self, mint_supply: u64) -> u64 {
+        if self.virtual_token_reserves == 0 {
+            return 0;
+        }
+        (self.virtual_quote_reserves as u128 * mint_supply as u128 / self.virtual_token_reserves as u128).min(u64::MAX as u128) as u64
+    }
+
     /// Curve state after a buy that put `net_in` lamports on the curve (fees excluded).
     pub fn after_buy(&self, net_in: u64, tokens_out: u64) -> Self {
         BondingCurve {
@@ -305,6 +313,10 @@ pub fn sell_sol_out(global: &Global, fc: &FeeConfig, curve: &BondingCurve, mint_
         return Ok(0);
     }
     let gross = swap_exact_input(tokens as u128, curve.virtual_token_reserves as u128, curve.virtual_quote_reserves as u128);
+    // The program pays out of real reserves and fails with Overflow (6024) past them.
+    if gross > curve.real_quote_reserves as u128 {
+        return Err(format!("sell would take {gross} lamports, curve holds only {} real", curve.real_quote_reserves).into());
+    }
     let [p, c] = curve_fee_bps(global, fc, curve, mint_supply)?;
     let fee = fee_amount(gross, p) + fee_amount(gross, c);
     Ok(gross.saturating_sub(fee) as u64)

@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -49,11 +50,19 @@ class FakeCapture:
         self._alive = False
 
     def start(self):
+        # Like the real capture: frames at ~3 fps (the aggregator needs a mint in
+        # >= 2 frames); the audio chunk (buy phrase) ends right as the mint appears.
         self._alive = True
-        now = time.time()
-        for i in range(3):
-            self.vq.put((now - (2 - i) * 0.1, b"\x00" * 16))
-        self.aq.put((now, b"\x00" * 3200))
+        threading.Thread(target=self._feed, daemon=True).start()
+
+    def _feed(self):
+        for i in range(30):
+            if not self._alive:
+                return
+            if i == 0:
+                self.aq.put((time.time(), b"\x00" * 3200))
+            self.vq.put((time.time(), b"\x00" * 16))
+            time.sleep(1 / 3)
 
     def is_alive(self):
         return self._alive
@@ -185,7 +194,12 @@ async def run(use_real: bool) -> int:
             os.unlink(sock)
 
     s = orch.stats
-    ok = s.frames > 0 and s.audio_chunks > 0 and (s.sent + s.rejected) >= 1 and not errors
+    # wire timestamp = capture time of the evidence, not send time (executor checks MAX_SIGNAL_AGE_MS)
+    for msg in received:
+        age = time.time() - float(msg.get("timestamp", 0))
+        if not 0 <= age < 30:
+            errors.append(f"timestamp not a recent capture time (age {age:.1f}s)")
+    ok = s.frames > 1 and s.audio_chunks > 0 and (s.sent + s.rejected) >= 1 and not errors
     print(f"\nframes={s.frames} audio={s.audio_chunks} signals={s.signals} sent={s.sent} "
           f"rejected={s.rejected} failed={s.send_failed} wire_errors={errors or 0}")
     if received:

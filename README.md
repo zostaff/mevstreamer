@@ -13,25 +13,29 @@
 ```
  Stream ──▶ Capture ──▶ OCR + Whisper ──▶ Signal ──▶ pump.fun v3 tx ──▶ Sender ‖ Jito ‖ RPC
  (Twitch/    (ffmpeg      (mint, $TICKER,   (score,     (fee-aware quote,    (same signature,
-  Kick/YT)    3fps + PCM)  platform, phrase) dedup)      TP / SL / timeout)   lands once)
+  Kick/YT)    3fps + PCM)  platform, phrase) guards)     risk limits)         lands once)
+                                                                    │
+                                     journal ◀── TP / SL / trailing / timeout on real value
 ```
 
 ---
 
 ## How it works
 
-1. **Capture.** `streamlink`/`yt-dlp` достают прямой URL стрима, два процесса `ffmpeg` выдают кадры 1280×720 (3 fps) и PCM 16 kHz кусками по 3 с. Обрыв → переподключение с backoff 1→30 с. Анализируется всегда самый свежий кадр: медленный OCR снижает частоту, но не копит задержку.
+1. **Capture.** `streamlink`/`yt-dlp` достают прямой URL стрима, два процесса `ffmpeg` выдают кадры 1280×720 (3 fps) и PCM 16 kHz кусками по 3 с. Обрыв → переподключение с backoff 1→30 с; watchdog убивает зависший ffmpeg (HLS без EOF) через 15 с без данных, оркестратор перезапускает умерший захват. Анализируется всегда самый свежий кадр, устаревшее аудио пропускается — задержка не копится.
 2. **Vision.** OCR кадра: на macOS — Apple Vision (Neural Engine, ~0.1 с/кадр), иначе EasyOCR. Детектор ищет Solana-адреса и `$TICKER`, UI-распознаватель — платформу и действие стримера. **Восстановление адресов**: если OCR испортил pump-mint (`1→I`, `2→Z`, `o→0`…), генерируются исправления и проверяются на mainnet одним `getMultipleAccounts` (кеш по строке).
 3. **Audio.** faster-whisper с VAD транскрибирует речь, keyword spotter ловит торговые фразы и тикеры.
-4. **Signal.** Скользящие окна (vision 3 с, audio 10 с), скоринг confidence 0…1, cooldown по токену, резолв mint по тикеру (Jupiter → DexScreener → Helius).
+4. **Signal.** Скользящие окна (vision 3 с, audio 10 с), скоринг confidence 0…1, cooldown по токену. Защита от ложных входов: mint должен быть виден минимум на 2 кадрах; если на экране несколько разных mint (чат-оверлей) — BUY не отправляется; buy-фраза привязывается только к mint, видимому ±2 с от момента речи; отрицания и «rug/scam/stay away» гасят сигнал. Сигналы только по тикеру (без mint на экране) по умолчанию не отправляются (`ALLOW_TICKER_ONLY`).
 5. **Quote & build.** Executor за один RPC round-trip берёт кривую + минт ‖ priority fee ‖ blockhash (кеш), квотирует `buy_exact_quote_in_v3` с комиссиями из pump-fees `FeeConfig` (тиры по market cap, creator fee, buyback-доля) и собирает v0-транзакцию: compute budget под замеренный расход, idempotent ATA, buy v3, tip'ы.
-6. **Land & manage.** Одна подписанная tx параллельно уходит во все релеи (Helius Sender, Jito-регионы, RPC) — одна подпись исполняется не более одного раза. Подтверждение — `getSignatureStatuses` каждые 400 мс. Позиция ведётся до take-profit / stop-loss / timeout, оценка выхода тоже с учётом комиссий.
+6. **Land.** Одна подписанная tx параллельно уходит во все релеи (Helius Sender, Jito-регионы, RPC) — одна подпись исполняется не более одного раза. Подтверждение — `getSignatureStatuses` каждые 200 мс, засчитывается только `confirmed`. «Не попала» объявляется только когда **высота блока перевалила `lastValidBlockHeight`** — не по таймеру; ошибка релея не считается «не отправлено». Так tx, приземлившаяся позже таймаута, не превращается в неучтённые токены и повторную покупку.
+7. **Manage.** Себестоимость — реальная дельта баланса из приземлившейся tx (комиссии, tip'ы, rent). Выход по **стоимости позиции** (сколько вернёт продажа всего сейчас, с комиссиями) против себестоимости: take-profit, stop-loss, trailing stop от пика, timeout; опрос каждые 400 мс. Продажа — весь баланс + закрытие ATA (возврат ~0.002 SOL rent). Для stop-loss/timeout/повторов slippage растёт до `EXIT_SLIPPAGE_PCT`, чтобы обвал не запер позицию.
+8. **Journal.** Каждое изменение позиции пишется в `logs/positions.json` (атомарно), события — в `logs/trades.jsonl`. После рестарта executor сверяет журнал с on-chain балансами кошелька и продолжает вести позиции; незавершённые покупки дожидается.
 
 ## Dual detection: Visual + Audio
 
 | Признак | Канал | Вес |
 |---|---|---|
-| mint-адрес на экране (в т.ч. восстановленный) | visual | +0.50 |
+| mint-адрес на экране, ≥2 кадров (× 0.8–1.0 по OCR-confidence; восстановленный ≤ 0.9) | visual | +0.50 |
 | `$TICKER` на экране | visual | +0.20 |
 | распознана торговая платформа | visual | +0.15 |
 | стример смотрит токен / на кнопке Buy / купил | visual | +0.10 / +0.30 / +0.40 |
@@ -40,7 +44,7 @@
 | оба канала подтверждают один токен | both | +0.20 |
 | тикер без mint (риск копиката) | — | −0.15 |
 
-Сумма обрезается до 1.0; порог исполнения по умолчанию 0.7. Mint на экране + платформа + buy-фраза (0.95) — проходит; только buy-фраза с тикером в речи (0.30) — нет.
+Сумма обрезается до 1.0; порог исполнения по умолчанию 0.7. Mint на экране + платформа + buy-фраза (0.95) — проходит; только buy-фраза с тикером в речи (0.30) — нет. Короткие бытовые фразы («let's go», «I'm in», «going on») — не buy-фразы; SELL — только явные («sold it», «taking profits», «I'm out»).
 
 ## Supported platforms
 
@@ -60,7 +64,8 @@ Photon · BullX · GMGN · pump.fun · Dexscreener — по URL/тексту н�
 | Восстановление испорченного mint | 0.4–1.1 с первый раз, ~0 мс из кеша | публичный RPC |
 | Агрегация + скоринг | ~0.1 мс | smoke test |
 | IPC Python → Rust | < 1 мс | smoke test |
-| Executor: состояние кривой + квота + сборка | ~140–150 мс (1 RPC round-trip) | dry-run на mainnet |
+| Executor: состояние кривой + квота + сборка | ~130–150 мс (1 RPC round-trip) | dry-run на mainnet |
+| Round-trip стоимость сделки (buy → sell сразу) | **−2.5%** от входа | комиссии pump 1.25% × 2; `--selfcheck` / paper |
 | Отправка: принятие релеем | 115 мс (RPC) … 0.5–0.9 с (Sender / Jito из EU-дома) | `--probe-relays` |
 
 Слоты в mainnet с октября 2026 — 200 мс, blockhash живёт ~30 с; executor обновляет его каждые 2 с и никогда не подписывает хешем старше 10 с.
@@ -91,14 +96,15 @@ mev-streamer/
 ├── signal/                 Module 4: решение (точка входа orchestrator.py)
 └── executor/               Module 5: исполнение (Rust)
     └── src/
-        ├── main.rs         Executor: buy/sell, кеш Global/FeeConfig, dry-run симуляция
+        ├── main.rs         Executor: buy/sell, сверка с on-chain, risk-проверки, восстановление
+        ├── journal.rs      positions.json (снапшот) + trades.jsonl (события)
         ├── bonding.rs      BondingCurve/Global/FeeConfig + fee-aware v3 квоты
         ├── tx_builder.rs   buy_exact_quote_in_v3 / sell_v3 (17 аккаунтов), compute budget, tips
         ├── sender.rs       fan-out: Helius Sender ‖ Jito ‖ RPC, подтверждение по подписи
         ├── jito.rs         Jito sendTransaction (bundleOnly), live tip_floor
         ├── rpc.rs          JSON-RPC: аккаунты, blockhash, priority fee, simulate
-        ├── selfcheck.rs    --selfcheck <MINT>, --probe-relays
-        ├── position.rs     TP / SL / timeout
+        ├── selfcheck.rs    --selfcheck, --inspect, --probe-relays
+        ├── position.rs     TP / SL / trailing / timeout по стоимости, лимиты сессии
         ├── pda.rs          адреса и PDA (проверяются тестом против seed'ов)
         ├── config.rs       .env → lamports/bps без f64
         ├── ipc.rs          UDS-сервер
@@ -117,11 +123,12 @@ IPC — NDJSON по Unix-сокету (`/tmp/mev-streamer.sock`, права 0600
 
 Источник истины — [pump-fun/pump-public-docs](https://github.com/pump-fun/pump-public-docs) (IDL от 2026-10-13). Executor использует **v3-трейды** (`buy_exact_quote_in_v3`, `sell_v3`): 17 аккаунтов вместо 26–27 у v2, комиссии протокола и создателя копятся на кривой, в трейде платится только buyback-доля.
 
-- Квоты — порт референсной математики `pump-rust-client 0.5.0` (MIT); `--selfcheck` на mainnet: **квота buy совпала с симуляцией до единицы токена, sell — до лампорта**.
+- Квоты — порт референсной математики `pump-rust-client 0.5.0` (MIT). `--selfcheck` на mainnet: **квота buy совпала с симуляцией до единицы токена**; полный выход одной симулированной tx (buy → sell всего → close ATA) — **дельта баланса до лампорта** (проверено на 3 mayhem-коинах, 2026-11-09).
+- Mayhem-коины (а это большинство свежих токенов в выборке 2026-11) поддерживаются; у них нет synthetic migration — слишком большая покупка просто отклоняется.
 - Старые «короткие» аккаунты кривой читаются с нулевым добором (как в официальном декодере).
-- Отказ с понятной причиной: кривая завершена (graduated), **кривая квотирована не в SOL**, cashback-коин (v3 их не принимает), покупка, пересекающая остаток кривой (synthetic migration).
+- Отказ с понятной причиной: кривая завершена (graduated), кривая квотирована не в SOL, cashback-коин (v3 их не принимает), покупка, пересекающая остаток кривой (synthetic migration), продажа больше реальных резервов кривой.
 
-Наблюдение с mainnet: из 7 свежих токенов 4 были квотированы не в SOL (в других pump-коинах и `Xs…`-минтах). Поддержка таких кривых через `multi_hop_curve_swap` — следующий шаг.
+**Кривые не в SOL.** Официальный путь — PumpSwap `multi_hop_swap` (SOL → A → B одной инструкцией). Но все встреченные на mainnet не-SOL цепочки заканчиваются **xStock**'ами (`Xs…`, токенизированные акции, Token-2022 с pausable/transfer-hook): например `GgN3…pump` квотирован в `Xsc9…` (TSLAx-подобный). Ни один pump-маршрут не ведёт к ним из SOL, поэтому multi-hop не помог бы ни в одном наблюдённом случае — отложено. `--inspect <MINT>` показывает цепочку квот.
 
 ## Quick start
 
@@ -140,9 +147,12 @@ $EDITOR .env                                        # RPC_URL, STREAM_URL; WALLE
 Перед первым live:
 
 ```bash
+executor/target/release/mev-streamer-executor --new-wallet ~/mevs-key.txt   # отдельный hot-кошелёк для бота
 executor/target/release/mev-streamer-executor --selfcheck <любой живой pump-mint на SOL-кривой>
 executor/target/release/mev-streamer-executor --probe-relays     # endpoint'ы и формат, ничего не тратит
 ```
+
+Дальше: `dry-run.sh` на нескольких реальных стримах и разбор `logs/trades.dry.jsonl` — PnL бумажных сделок покажет, есть ли у стратегии край, до того как рисковать деньгами.
 
 ## Configuration
 
@@ -160,8 +170,10 @@ executor/target/release/mev-streamer-executor --probe-relays     # endpoint'ы �
 | `VISION_ROI_MODE` | `auto` | vision | `auto` = весь кадр для Apple Vision, зоны для остальных |
 | `VISION_MINT_REPAIR` | true | vision | исправление OCR-ошибок в mint с проверкой через `RPC_URL` |
 | `UI_DETECTION` | true | vision | платформа и действие |
-| `WHISPER_MODEL` / `WHISPER_DEVICE` | `base.en` / `cuda` | audio | без CUDA сам уходит на CPU int8; `small.en` — только с GPU |
+| `WHISPER_MODEL` / `WHISPER_DEVICE` | `base.en` / auto | audio | CUDA если есть, иначе CPU int8; `small.en` — только с GPU |
+| `CAPTURE_STALL_TIMEOUT_SEC` | 15 | ingestion | перезапуск ffmpeg без данных |
 | `SIGNAL_THRESHOLD` / `SIGNAL_COOLDOWN_SEC` | 0.7 / 60 | signal | |
+| `ALLOW_TICKER_ONLY` | false | signal | отправлять BUY без mint на экране (резолв по тикеру — риск копиката) |
 | `HELIUS_API_KEY` | из `RPC_URL` | signal | проверка mint при резолве тикера |
 | `BUY_SOL` | — | executor | бюджет входа (комиссии внутри него) |
 | `RELAYS` | `sender,jito` | executor | `sender` (Helius Sender), `jito`, `rpc` — через запятую |
@@ -170,8 +182,16 @@ executor/target/release/mev-streamer-executor --probe-relays     # endpoint'ы �
 | `SENDER_TIP` / `HELIUS_SENDER_URL` | 0.000005 / global `/fast` | executor | ≥ 0.001 → Sender Max; меньше → автоматически `?swqos_only=true` |
 | `PRIORITY_FEE` | `auto` | executor | auto = p75 недавних комиссий по этой кривой, в `[PRIORITY_FEE_MIN, PRIORITY_FEE_MAX]` µL/CU |
 | `CU_LIMIT_BUY` / `CU_LIMIT_SELL` | 90000 / 60000 | executor | замерено: buy 70–74k, sell 46k CU |
-| `TAKE_PROFIT` / `STOP_LOSS` / `TIMEOUT_SEC` | 2.0 / 0.5 / 120 | executor | |
-| `MAX_POSITIONS` / `SLIPPAGE_PCT` | 3 / 5 | executor | |
+| `TAKE_PROFIT` / `STOP_LOSS` / `TIMEOUT_SEC` | 2.0 / 0.6 / 120 | executor | множители **стоимости позиции** к реальной себестоимости |
+| `TRAILING_STOP` | 0.25 | executor | продать на 25% ниже пика, когда пик ≥ 1.2×; 0 = выкл |
+| `SLIPPAGE_PCT` / `EXIT_SLIPPAGE_PCT` | 15 / 40 | executor | вход и TP / потолок для SL, timeout и повторов |
+| `MAX_POSITIONS` | 3 | executor | одновременно |
+| `MAX_SESSION_LOSS` | 3 × `BUY_SOL` | executor | реализованный убыток сессии → покупки остановлены; 0 = выкл |
+| `MAX_CONSECUTIVE_LOSSES` | 5 | executor | подряд убыточных → покупки остановлены |
+| `MIN_SOL_RESERVE` | 0.01 | executor | остаток на кошельке после покупки (на выход) |
+| `MAX_SIGNAL_AGE_MS` | 6000 | executor | сигнал старше (от захвата кадра/аудио) — отброшен |
+| `MIN_CONFIDENCE` / `MAX_MCAP_SOL` / `REBUY` | 0 / выкл / false | executor | доп. фильтры; повторная покупка того же mint за сессию |
+| `MONITOR_INTERVAL_MS` / `STATE_DIR` | 400 / `logs` | executor | опрос правил выхода / журнал |
 | `SIM_PAYER` | богатый системный кошелёк | executor | от чьего имени симулировать в DRY_RUN без ключа |
 | `DRY_RUN` | true | оба | см. режимы |
 | `IPC_SOCKET_PATH` / `SOCKET_PATH` | `/tmp/mev-streamer.sock` | signal / executor | скрипты синхронизируют обе |
@@ -199,9 +219,10 @@ Executor лёгкий всегда: время уходит в RPC и сеть. 
 ## Development & debugging
 
 ```bash
-./scripts/check.sh              # cargo test (27), compileall, keyword spotter, mint repair, smoke test
+./scripts/check.sh              # cargo test (31), compileall, keyword spotter, mint repair, unit checks (47), smoke test
 ./scripts/check.sh --network    # + smoke test с настоящим executor'ом
-executor/target/release/mev-streamer-executor --selfcheck <MINT>   # v3 buy/sell против mainnet-симуляции
+executor/target/release/mev-streamer-executor --selfcheck <MINT>   # buy + полный выход против mainnet-симуляции
+executor/target/release/mev-streamer-executor --inspect <MINT>     # цепочка квот, где торгуется каждый уровень
 executor/target/release/mev-streamer-executor --probe-relays       # релеи принимают формат?
 ```
 
@@ -221,18 +242,22 @@ executor/target/release/mev-streamer-executor --probe-relays       # релеи 
 - слышать торговые фразы и тикеры;
 - собирать pump.fun v3 buy/sell по актуальному IDL с точным (сверенным симуляцией) учётом комиссий;
 - рассылать одну транзакцию в Helius Sender, несколько регионов Jito и RPC, с live-tip и live-priority fee;
-- вести позиции с TP/SL/timeout, в т.ч. бумажные с реальной симуляцией в DRY_RUN;
+- вести позиции с TP / SL / trailing / timeout по реальной стоимости, в т.ч. бумажные (с учётом собственной покупки на кривой);
+- переживать рестарт: журнал позиций сверяется с on-chain балансами, незавершённые покупки дожидаются;
+- не купить дважды из-за «таймаута», который на деле приземлился; не запуститься вторым экземпляром на том же кошельке;
+- останавливать покупки по лимитам сессии (убыток, серия потерь, резерв SOL, возраст сигнала);
 - проверять себя против mainnet (`--selfcheck`, `--probe-relays`) после апгрейдов pump.fun.
 
 **Не может:**
-- **покупать на кривых, квотированных не в SOL** (USDC, другие pump-коины) — частый случай с октября 2026; нужен multi-hop;
+- покупать на кривых, квотированных не в SOL (наблюдались только цепочки в xStock'и — из SOL недостижимы);
 - торговать cashback-коины (v3 их отклоняет; новых cashback-коинов не создают) и токены после миграции (PumpSwap) — позиция закрывается как `GRADUATED`, продавать вручную;
 - покупку, которая выбирает остаток кривой (synthetic migration) — отклоняется;
 - обогнать задержку самой платформы стрима;
-- надёжно отличить оригинал от копиката по одному тикеру (за это штраф −0.15);
-- понимать сарказм и «не покупайте это».
+- надёжно отличить оригинал от копиката по одному тикеру — поэтому без mint на экране не покупает;
+- понимать сарказм (явные отрицания и «rug/scam» — понимает);
+- проверять «чистоту» токена (dev-кошелёк, бандлы, концентрацию холдеров) — только market cap (`MAX_MCAP_SOL`).
 
-**Статус live:** транзакции собираются по актуальному IDL и проходят mainnet-симуляцию; релеи принимают формат. Реальная сделка с деньгами в рамках разработки не проводилась — начните с минимального `BUY_SOL`.
+**Статус live:** транзакции собираются по актуальному IDL, buy и полный выход сходятся с mainnet-симуляцией до лампорта; релеи принимают формат; восстановление из журнала и защита от второго экземпляра проверены на mainnet с пустым кошельком. Реальная сделка с деньгами в рамках разработки не проводилась, и прибыльность стратегии не измерена — сначала paper-прогоны, потом минимальный `BUY_SOL`.
 
 ## Disclaimer
 

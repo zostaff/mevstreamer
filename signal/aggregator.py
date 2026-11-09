@@ -25,6 +25,7 @@ Vision работает на 3 fps, audio — чанками по 3 сек, по
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from collections import deque
@@ -55,7 +56,11 @@ SELL_ACTIONS = frozenset({"about_to_sell", "sold"})
 # Приоритет при нескольких действиях на одном фрейме: факт > намерение > просмотр
 _ACTION_PRIORITY = {"bought": 5, "sold": 5, "about_to_buy": 4, "about_to_sell": 4, "viewing_token": 1}
 
+log = logging.getLogger("signal.aggregator")
+
 MIN_TICKER_CONF = 0.4
+REPAIRED_MINT_MAX_FACTOR = 0.9
+MINT_CONF_FLOOR = 0.8
 MIN_ACTION_CONF = 0.5
 MIN_PHRASE_CONF = 0.5
 
@@ -115,6 +120,35 @@ def _items(val: Any, key: str, min_conf: float = 0.0) -> list[str]:
     return out
 
 
+def _mint_items(val: Any) -> list[tuple[str, float]]:
+    """mints/addresses → [(mint, weight_factor)]: фактор = OCR/address confidence
+    (строки без confidence → 1.0), восстановленные mint_repair — не больше 0.9."""
+    out = []
+    for item in _as_list(val):
+        if isinstance(item, dict):
+            addr = item.get("address") or item.get("mint")
+            if addr is None:
+                continue
+            # Валидный 32-байтовый base58-адрес сам себя проверяет (случайная
+            # OCR-ошибка почти всегда ломает декодирование), поэтому OCR-confidence —
+            # слабый сигнал: фактор 0.8…1.0. Apple Vision часто отдаёт ровно 0.5 —
+            # без пола это резало вес mint вдвое и сигнал не доходил до порога.
+            conf = MINT_CONF_FLOOR + (1.0 - MINT_CONF_FLOOR) * float(item.get("confidence", 1.0))
+            if item.get("repaired_from"):
+                conf = min(conf, REPAIRED_MINT_MAX_FACTOR)
+        else:
+            addr, conf = item, 1.0
+        addr = str(addr).strip()
+        if is_valid_mint(addr):
+            out.append((addr, max(0.0, min(1.0, conf))))
+    return out
+
+
+def _near_same_mint(a: str, b: str) -> bool:
+    """Два mint'а — вероятно один и тот же, испорченный OCR (≤2 позиционных отличия)."""
+    return len(a) == len(b) and sum(x != y for x, y in zip(a, b)) <= 2
+
+
 def _uniq(items: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(i for i in items if i))
 
@@ -141,10 +175,19 @@ class VisionObservation:
     action: str | None = None  # viewing_token | about_to_buy | bought | sold
     text: str = ""
     timestamp: float = 0.0
+    # mint → weight factor (OCR confidence; repaired ≤ 0.9). Нет записи → 1.0
+    mint_conf: tuple[tuple[str, float], ...] = ()
+    # Только в merged-снапшоте: mint'ы, увиденные в 1 фрейме (ещё не подтверждены),
+    # и флаг «в окне >1 разных mint'ов» — BUY запрещён
+    unconfirmed_mints: tuple[str, ...] = ()
+    ambiguous_mints: bool = False
 
     @property
     def empty(self) -> bool:
         return not (self.mints or self.tickers or self.platform or self.action)
+
+    def mint_factor(self, mint: str) -> float:
+        return dict(self.mint_conf).get(mint, 1.0)
 
 
 @dataclass(frozen=True)
@@ -171,12 +214,20 @@ def normalize_vision(raw: Any, timestamp: float) -> VisionObservation | None:
     actions = [a for a in actions if a]
     action = max(actions, key=_ACTION_PRIORITY.__getitem__) if actions else None
     platform = _field(raw, "platform")
-    mints = _field(raw, "mints", "mint", "mint_addresses")
-    if mints is None:  # addresses: [{address, type}] — только mint, не кошельки
-        mints = [a for a in _as_list(_field(raw, "addresses"))
+    # addresses: [{address, type, confidence, repaired_from?}] — приоритетнее,
+    # т.к. несут confidence (VisionResult.mints — голые строки). Только mint, не кошельки.
+    addresses = _field(raw, "addresses")
+    if addresses is not None:
+        mints = [a for a in _as_list(addresses)
                  if not isinstance(a, dict) or a.get("type", "mint") == "mint"]
+    else:
+        mints = _field(raw, "mints", "mint", "mint_addresses")
+    conf: dict[str, float] = {}
+    for m, c in _mint_items(mints):
+        conf[m] = max(c, conf.get(m, 0.0))
     obs = VisionObservation(
-        mints=_uniq(m.strip() for m in _items(mints, "address") if is_valid_mint(m.strip())),
+        mints=tuple(conf),
+        mint_conf=tuple(conf.items()),
         tickers=_uniq(normalize_ticker(t) for t in _items(_field(raw, "tickers", "ticker"), "ticker", MIN_TICKER_CONF)),
         platform=str(platform).strip() or None if platform else None,
         action=action,
@@ -224,17 +275,38 @@ class SignalAggregator:
     Порядок токенов — по свежести (последний увиденный первым): если стример
     переключился на другой токен, сигнал должен относиться к нему, а не к
     тому, что дольше висел на экране.
+
+    Защита от чужих mint'ов (чат-оверлей, OCR-мусор):
+      * mint попадает в снапшот, только если виден в >= MIN_MINT_FRAMES фреймах окна;
+      * если в окне видно >1 разных mint'ов (OCR-варианты одного не в счёт) —
+        ambiguous_mints=True, scorer не выдаёт BUY;
+      * buy/sell-фраза живёт phrase_ttl_sec и привязывается к mint'у, только если
+        mint был на экране в ±phrase_bind_sec от момента, когда фразу произнесли
+        ([ts - audio_chunk_sec, ts], ts — конец аудио-чанка).
     """
 
-    def __init__(self, vision_window_sec: float = 3.0, audio_window_sec: float = 10.0):
+    MIN_MINT_FRAMES = 2
+    _AMBIG_LOG_INTERVAL = 10.0
+
+    def __init__(self, vision_window_sec: float = 3.0, audio_window_sec: float = 10.0,
+                 phrase_ttl_sec: float = 4.0, phrase_bind_sec: float = 2.0,
+                 audio_chunk_sec: float = 3.0):
         self.vision_window_sec = vision_window_sec
         self.audio_window_sec = audio_window_sec
+        self.phrase_ttl_sec = phrase_ttl_sec
+        self.phrase_bind_sec = phrase_bind_sec
+        self.audio_chunk_sec = audio_chunk_sec
         self._vision: deque[VisionObservation] = deque()
         self._audio: deque[AudioObservation] = deque()
+        # (ts, mint) — история показов mint'ов дольше vision-окна: для привязки фраз
+        self._mint_seen: deque[tuple[float, str]] = deque()
+        self._last_ambig_log = 0.0
 
     def add_vision(self, obs: VisionObservation | None) -> None:
         if obs is not None:
             self._vision.append(obs)
+            for m in obs.mints:
+                self._mint_seen.append((obs.timestamp, m))
 
     def add_audio(self, obs: AudioObservation | None) -> None:
         if obs is not None:
@@ -245,16 +317,50 @@ class SignalAggregator:
             self._vision.popleft()
         while self._audio and now - self._audio[0].timestamp > self.audio_window_sec:
             self._audio.popleft()
+        keep = self.audio_window_sec + self.audio_chunk_sec + self.phrase_bind_sec
+        while self._mint_seen and now - self._mint_seen[0][0] > keep:
+            self._mint_seen.popleft()
 
     def snapshot(self, now: float | None = None) -> tuple[VisionObservation | None, AudioObservation | None]:
         now = time.time() if now is None else now
         self._prune(now)
-        return self._merge_vision(), self._merge_audio()
+        vis, aud = self._merge_vision(), self._merge_audio(now)
+        if vis is not None and vis.ambiguous_mints and now - self._last_ambig_log > self._AMBIG_LOG_INTERVAL:
+            self._last_ambig_log = now
+            log.warning("ambiguous mints in window (%d distinct) — BUY suppressed: %s",
+                        len(set(vis.mints) | set(vis.unconfirmed_mints)),
+                        ", ".join(f"{m[:4]}…{m[-4:]}" for m in (*vis.mints, *vis.unconfirmed_mints)))
+        if aud is not None and vis is not None and vis.mints and (aud.buy_phrase or aud.sell_phrase):
+            if not self._mint_near(vis.mints[0], aud.timestamp):
+                # Фразу сказали, когда этого mint'а на экране не было → не связываем
+                aud = AudioObservation(transcript=aud.transcript, tickers=aud.tickers,
+                                       mints=aud.mints, timestamp=aud.timestamp)
+                aud = None if aud.empty else aud
+        return vis, aud
+
+    def _mint_near(self, mint: str, phrase_end_ts: float) -> bool:
+        lo = phrase_end_ts - self.audio_chunk_sec - self.phrase_bind_sec
+        hi = phrase_end_ts + self.phrase_bind_sec
+        return any(m == mint and lo <= ts <= hi for ts, m in self._mint_seen)
 
     def _merge_vision(self) -> VisionObservation | None:
         if not self._vision:
             return None
         newest_first = list(reversed(self._vision))
+        frames: dict[str, int] = {}
+        factor: dict[str, float] = {}
+        for o in newest_first:
+            for m in o.mints:
+                frames[m] = frames.get(m, 0) + 1
+                factor[m] = max(factor.get(m, 0.0), o.mint_factor(m))
+        all_mints = _uniq(m for o in newest_first for m in o.mints)
+        confirmed = tuple(m for m in all_mints if frames[m] >= self.MIN_MINT_FRAMES)
+        unconfirmed = tuple(m for m in all_mints if frames[m] < self.MIN_MINT_FRAMES)
+        # Кластеры: OCR-варианты одного адреса (≤2 отличия) — один mint
+        clusters: list[str] = []
+        for m in all_mints:
+            if not any(_near_same_mint(m, c) for c in clusters):
+                clusters.append(m)
         platform = next((o.platform for o in newest_first if o.platform), None)
         actions = [o.action for o in newest_first if o.action]
         if actions and actions[0] in SELL_ACTIONS:
@@ -263,7 +369,10 @@ class SignalAggregator:
             buy_actions = [a for a in actions if a in BUY_ACTION_RANK]
             action = max(buy_actions, key=BUY_ACTION_RANK.__getitem__) if buy_actions else None
         return VisionObservation(
-            mints=_uniq(m for o in newest_first for m in o.mints),
+            mints=confirmed,
+            mint_conf=tuple((m, factor[m]) for m in confirmed),
+            unconfirmed_mints=unconfirmed,
+            ambiguous_mints=len(clusters) > 1,
             tickers=_uniq(t for o in newest_first for t in o.tickers),
             platform=platform,
             action=action,
@@ -271,19 +380,26 @@ class SignalAggregator:
             timestamp=newest_first[0].timestamp,
         )
 
-    def _merge_audio(self) -> AudioObservation | None:
+    def _merge_audio(self, now: float) -> AudioObservation | None:
         if not self._audio:
             return None
         newest_first = list(reversed(self._audio))
+        # Фразы живут phrase_ttl_sec (тикеры/транскрипт — всё audio-окно)
+        fresh = [o for o in newest_first if now - o.timestamp <= self.phrase_ttl_sec]
+        buy = next((o for o in fresh if o.buy_phrase), None)
+        sell = next((o for o in fresh if o.sell_phrase), None)
+        phrase_obs = buy or sell
         return AudioObservation(
             transcript=" ".join(o.transcript for o in self._audio if o.transcript).strip(),
-            buy_phrase=next((o.buy_phrase for o in newest_first if o.buy_phrase), None),
-            sell_phrase=next((o.sell_phrase for o in newest_first if o.sell_phrase), None),
+            buy_phrase=buy.buy_phrase if buy else None,
+            sell_phrase=sell.sell_phrase if sell else None,
             tickers=_uniq(t for o in newest_first for t in o.tickers),
             mints=_uniq(m for o in newest_first for m in o.mints),
-            timestamp=newest_first[0].timestamp,
+            # время фразы (если есть) — по нему привязка к mint'у и wire-timestamp
+            timestamp=phrase_obs.timestamp if phrase_obs else newest_first[0].timestamp,
         )
 
     def clear(self) -> None:
         self._vision.clear()
         self._audio.clear()
+        self._mint_seen.clear()

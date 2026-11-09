@@ -19,8 +19,11 @@ pub const DEFAULT_SENDER_URL: &str = "https://sender.helius-rpc.com/fast";
 pub const SENDER_MAX_MIN_TIP: u64 = 1_000_000;
 pub const SENDER_SWQOS_MIN_TIP: u64 = 5_000;
 const SENDER_PING_EVERY: Duration = Duration::from_secs(4);
-/// ~2 slots at 200 ms.
-const STATUS_POLL: Duration = Duration::from_millis(400);
+/// ~1 slot at 200 ms.
+const STATUS_POLL: Duration = Duration::from_millis(200);
+const HEIGHT_CHECK_EVERY: Duration = Duration::from_secs(2);
+/// Safety net if the RPC never answers; validity is ~150 blocks ≈ 30 s + skips.
+const LAND_HARD_CAP: Duration = Duration::from_secs(120);
 
 /// From https://www.helius.dev/docs/sending-transactions/sender (2026-11-09).
 pub const SENDER_TIP_ACCOUNTS: [Pubkey; 10] = [
@@ -66,9 +69,21 @@ impl Relay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LandStatus {
+    /// Executed successfully, confirmed or better.
     Landed { slot: u64 },
+    /// Executed and failed on-chain (slippage, …): nothing changed except fees.
     Failed(String),
-    TimedOut,
+    /// Block height passed the blockhash's lastValidBlockHeight: it can never land.
+    Expired,
+    /// Gave up waiting (RPC trouble) without proof either way — treat as "may have landed".
+    Unknown,
+}
+
+impl LandStatus {
+    /// True when the tx definitely did not change token balances.
+    pub fn definitely_not_landed(&self) -> bool {
+        matches!(self, LandStatus::Failed(_) | LandStatus::Expired)
+    }
 }
 
 pub struct Submitter {
@@ -167,19 +182,44 @@ impl Submitter {
         v.as_str().map(String::from).ok_or_else(|| format!("sender: unexpected result {v}").into())
     }
 
-    /// Poll the signature until it lands, fails, or `timeout` elapses.
-    pub async fn wait_for_landing(&self, signature: &str, timeout: Duration) -> LandStatus {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
+    /// Poll the signature until it is confirmed (ok or failed) or its blockhash expires.
+    ///
+    /// Expiry is decided by block height, not wall-clock: skipped slots stretch the
+    /// ~150-block validity window, and a tx reported "timed out" that lands later is
+    /// exactly how bots end up holding untracked tokens or buying twice.
+    pub async fn wait_for_landing(&self, signature: &str, last_valid_height: u64) -> LandStatus {
+        let t0 = Instant::now();
+        let mut next_height_check = Instant::now() + HEIGHT_CHECK_EVERY;
+        let mut expired = false;
+        loop {
             tokio::time::sleep(STATUS_POLL).await;
             match self.rpc.signature_status(signature).await {
-                Ok(Some((slot, None))) => return LandStatus::Landed { slot },
-                Ok(Some((_, Some(err)))) => return LandStatus::Failed(err),
-                Ok(None) => {}
+                Ok(Some(st)) if st.confirmed => {
+                    return match st.err {
+                        None => LandStatus::Landed { slot: st.slot },
+                        Some(e) => LandStatus::Failed(e),
+                    };
+                }
+                Ok(_) => {}
                 Err(e) => log_warn!("getSignatureStatuses {}…: {e}", &signature[..8.min(signature.len())]),
             }
+            if expired {
+                // One more status read after the height passed the limit (it might have
+                // landed in the very last valid block).
+                return LandStatus::Expired;
+            }
+            if t0.elapsed() >= LAND_HARD_CAP {
+                return LandStatus::Unknown;
+            }
+            if Instant::now() >= next_height_check {
+                next_height_check = Instant::now() + HEIGHT_CHECK_EVERY;
+                match self.rpc.block_height().await {
+                    Ok(h) if h > last_valid_height => expired = true,
+                    Ok(_) => {}
+                    Err(e) => log_warn!("getBlockHeight: {e}"),
+                }
+            }
         }
-        LandStatus::TimedOut
     }
 
     /// Keep the TLS connection to Sender warm between sparse signals (Helius: ping if

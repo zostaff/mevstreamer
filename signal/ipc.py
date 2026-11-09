@@ -46,7 +46,7 @@ class ExecutorClient:
         self,
         socket_path: str = IPC_SOCKET_PATH,
         connect_timeout: float = 1.0,
-        response_timeout: float = 3.0,
+        response_timeout: float = 10.0,
         warn_interval_sec: float = 30.0,
     ):
         self.socket_path = socket_path
@@ -63,7 +63,8 @@ class ExecutorClient:
             log.warning(msg, *args)
 
     async def send_signal(self, signal) -> ExecutorResponse | None:
-        """Отправить сигнал. None — executor недоступен / не ответил (не исключение)."""
+        """Отправить сигнал. None — не доставлен (executor недоступен / IPC error).
+        status="unknown" — отправлен, но ответа не дождались (мог исполниться)."""
         payload = signal.to_dict() if hasattr(signal, "to_dict") else dict(signal)
         data = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
         t0 = time.perf_counter()
@@ -84,8 +85,12 @@ class ExecutorClient:
             await writer.drain()
             line = await asyncio.wait_for(reader.readline(), self.response_timeout)
         except asyncio.TimeoutError:
-            log.warning("executor не ответил за %.1fs — статус сигнала неизвестен", self.response_timeout)
-            return None
+            # Сигнал уже записан в сокет: executor мог его принять и исполнить —
+            # это НЕ «failed» и повторять нельзя (двойная покупка).
+            log.warning("executor не ответил за %.1fs — статус: unknown (executor may still execute)",
+                        self.response_timeout)
+            return ExecutorResponse(ok=False, status="unknown", error="reply timeout (executor may still execute)",
+                                    latency_ms=(time.perf_counter() - t0) * 1000)
         except (ConnectionError, OSError) as e:
             log.warning("executor IPC error: %s", e)
             return None

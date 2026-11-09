@@ -310,7 +310,10 @@ class StreamCapture:
     def _ffmpeg_base(src: str) -> list[str]:
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error"]
         if src.startswith(("http://", "https://")):
-            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+            cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                    # I/O-таймаут 10 с (µs): зависший сокет → ошибка, а не вечный read().
+                    # HLS-демуксер пробрасывает rw_timeout во вложенные запросы сегментов.
+                    "-rw_timeout", "10000000"]
             if ".m3u8" in src:
                 # Стартовать с live edge, а не с начала плейлиста — иначе на
                 # старте вылетает пачка старых сегментов быстрее real-time
@@ -386,10 +389,23 @@ class StreamCapture:
                     stderr_tail.append(line)
                     log.debug("[%s] ffmpeg: %s", kind, line)
 
+        cfg = self.config
+        last_data = [time.monotonic()]
+        got_any = [False]
+        in_chunk = [False]  # on_chunk ждёт место в очереди — это не stall ffmpeg
+
         def watch_stop() -> None:
-            # Разблокирует read() в главном потоке при stop()
+            # Разблокирует read() в главном потоке при stop() и при зависании
+            # потока (HLS stall: ffmpeg жив, но stdout молчит) → reconnect.
             while proc.poll() is None:
-                if self.stop_event.wait(0.2):
+                if self.stop_event.wait(0.5):
+                    _kill(proc)
+                    return
+                limit = cfg.stall_timeout if got_any[0] else max(cfg.stall_timeout, cfg.startup_timeout)
+                idle = time.monotonic() - last_data[0]
+                if idle > limit and not in_chunk[0]:
+                    log.warning("[%s] нет данных %.0fs — ffmpeg завис, перезапуск", kind, idle)
+                    stderr_tail.append(f"watchdog: stalled {idle:.0f}s")
                     _kill(proc)
                     return
 
@@ -401,9 +417,14 @@ class StreamCapture:
             while not self.stop_event.is_set():
                 data = proc.stdout.read(chunk_size)  # блокирует до полного фрейма/чанка или EOF
                 if len(data) < chunk_size:
-                    break  # EOF / обрыв; неполный хвост выбрасываем
-                got_data = True
-                on_chunk(time.time(), data)
+                    break  # EOF / обрыв / kill от watchdog; неполный хвост выбрасываем
+                got_data = got_any[0] = True
+                in_chunk[0] = True
+                try:
+                    on_chunk(time.time(), data)
+                finally:
+                    in_chunk[0] = False
+                    last_data[0] = time.monotonic()
         finally:
             _kill(proc)
             if not self.stop_event.is_set():
@@ -598,4 +619,8 @@ def _standalone_test(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # multiprocessing (spawn) runs helpers via `python -c`, which puts cwd first on
+    # sys.path; from the repo root the local signal/ package would shadow stdlib
+    # `signal`. PYTHONSAFEPATH=1 (3.11+) is inherited by the children and prevents it.
+    os.environ["PYTHONSAFEPATH"] = "1"
     sys.exit(_standalone_test())

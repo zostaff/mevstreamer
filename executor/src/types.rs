@@ -56,10 +56,19 @@ impl Response {
 pub enum ExitReason {
     TakeProfit,
     StopLoss,
+    /// Value fell TRAILING_STOP below its peak after the trail armed.
+    TrailingStop,
     Timeout,
     Manual,
     /// Curve completed (migrated) — can no longer sell on the bonding curve.
     Graduated,
+}
+
+impl ExitReason {
+    /// Exits where getting out matters more than price: escalate slippage.
+    pub fn urgent(self) -> bool {
+        matches!(self, ExitReason::StopLoss | ExitReason::TrailingStop | ExitReason::Timeout | ExitReason::Manual)
+    }
 }
 
 impl fmt::Display for ExitReason {
@@ -67,6 +76,7 @@ impl fmt::Display for ExitReason {
         f.write_str(match self {
             ExitReason::TakeProfit => "TAKE_PROFIT",
             ExitReason::StopLoss => "STOP_LOSS",
+            ExitReason::TrailingStop => "TRAILING_STOP",
             ExitReason::Timeout => "TIMEOUT",
             ExitReason::Manual => "MANUAL",
             ExitReason::Graduated => "GRADUATED",
